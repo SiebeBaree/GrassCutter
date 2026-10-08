@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`field > generates the same meadow every time 1`] = `
+[
+  "-0.9183",
+  "-2.0177",
+  "1.9776",
+]
+`;
+
+exports[`field > generates the same meadow every time 2`] = `
+[
+  "-27.00",
+  "-236.99",
+  "15678.49",
+]
+`;
