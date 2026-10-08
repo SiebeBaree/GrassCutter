@@ -111,8 +111,9 @@ function snip() {
 
 function lockPointer() {
   const canvas = renderer.domElement
-  // Raw mouse input where supported, plain pointer lock elsewhere.
-  canvas.requestPointerLock({ unadjustedMovement: true }).catch(() => canvas.requestPointerLock().catch(() => {}))
+  // Raw mouse input where supported, plain pointer lock elsewhere. Firefox returns undefined, not a promise.
+  const plain = () => Promise.resolve(canvas.requestPointerLock()).catch(() => {})
+  Promise.resolve(canvas.requestPointerLock({ unadjustedMovement: true })).catch(plain)
 }
 
 const hud = createHud(document.body, {
