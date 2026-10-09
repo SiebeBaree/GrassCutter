@@ -1,11 +1,17 @@
-// Every sound is synthesised: filtered noise for wind and rustling, sine partials for the metal snip.
+// Every sound is synthesised: filtered noise for wind, rustling, swooshes and bangs, oscillators for
+// metal, the mower engine and fanfares.
 
 const MUTE_KEY = 'grass-cutter/muted'
+const VOLUME = 0.8
+
+/** Equal-tempered note frequency, counting semitones from A4. */
+const note = (semitones: number) => 440 * 2 ** (semitones / 12)
 
 export function createAudio() {
   let ctx: AudioContext | null = null
   let master: GainNode | null = null
   let noise: AudioBuffer | null = null
+  let engine: ReturnType<typeof createEngine> | null = null
   let muted = readMuted()
 
   function readMuted() {
@@ -21,7 +27,7 @@ export function createAudio() {
     if (!ctx) {
       ctx = new AudioContext()
       master = ctx.createGain()
-      master.gain.value = muted ? 0 : 0.8
+      master.gain.value = muted ? 0 : VOLUME
       master.connect(ctx.destination)
       noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate)
       const data = noise.getChannelData(0)
@@ -31,6 +37,11 @@ export function createAudio() {
     }
     if (ctx.state === 'suspended') void ctx.resume()
     return ctx
+  }
+
+  /** The context only when it is already running; sounds that need no gesture skip silently otherwise. */
+  function running() {
+    return ctx && master && ctx.state === 'running' ? { ac: ctx, out: master } : null
   }
 
   function startWind(ac: AudioContext, out: GainNode, buffer: AudioBuffer) {
@@ -54,7 +65,8 @@ export function createAudio() {
 
   function scheduleBird() {
     setTimeout(() => {
-      if (ctx && master && ctx.state === 'running') chirp(ctx, master)
+      const live = running()
+      if (live) chirp(live.ac, live.out)
       scheduleBird()
     }, 3500 + Math.random() * 9000)
   }
@@ -81,7 +93,7 @@ export function createAudio() {
   }
 
   function noiseBurst(ac: AudioContext, out: AudioNode, at: number, length: number, type: BiquadFilterType, freq: number, q: number, volume: number) {
-    if (!noise) return
+    if (!noise) return null
     const src = ac.createBufferSource()
     src.buffer = noise
     const filter = ac.createBiquadFilter()
@@ -95,6 +107,86 @@ export function createAudio() {
     src.connect(filter).connect(gain).connect(out)
     src.start(at, Math.random() * 1.5)
     src.stop(at + length + 0.05)
+    return filter
+  }
+
+  /** A short decaying tone. */
+  function ping(ac: AudioContext, out: AudioNode, at: number, freq: number, volume: number, length: number, type: OscillatorType = 'sine') {
+    const osc = ac.createOscillator()
+    osc.type = type
+    osc.frequency.value = freq
+    const gain = ac.createGain()
+    gain.gain.setValueAtTime(0, at)
+    gain.gain.linearRampToValueAtTime(volume, at + 0.008)
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + length)
+    osc.connect(gain).connect(out)
+    osc.start(at)
+    osc.stop(at + length + 0.02)
+  }
+
+  /** Two-stroke engine: a sawtooth through a lowpass, a rumble and a whirr that rises while cutting. */
+  function createEngine(ac: AudioContext, out: GainNode, buffer: AudioBuffer) {
+    const level = ac.createGain()
+    level.gain.value = 0
+    level.connect(out)
+
+    const tone = ac.createOscillator()
+    tone.type = 'sawtooth'
+    tone.frequency.value = 42
+    const toneFilter = ac.createBiquadFilter()
+    toneFilter.type = 'lowpass'
+    toneFilter.frequency.value = 520
+    toneFilter.Q.value = 2
+    const toneGain = ac.createGain()
+    toneGain.gain.value = 0.55
+    tone.connect(toneFilter).connect(toneGain).connect(level)
+
+    // The putter: amplitude pulses at the firing rate.
+    const pulse = ac.createOscillator()
+    pulse.type = 'square'
+    pulse.frequency.value = 21
+    const pulseDepth = ac.createGain()
+    pulseDepth.gain.value = 0.25
+    pulse.connect(pulseDepth).connect(toneGain.gain)
+
+    const rumble = ac.createBufferSource()
+    rumble.buffer = buffer
+    rumble.loop = true
+    const rumbleFilter = ac.createBiquadFilter()
+    rumbleFilter.type = 'bandpass'
+    rumbleFilter.frequency.value = 160
+    rumbleFilter.Q.value = 0.9
+    const rumbleGain = ac.createGain()
+    rumbleGain.gain.value = 0.7
+    rumble.connect(rumbleFilter).connect(rumbleGain).connect(level)
+
+    const whirr = ac.createBufferSource()
+    whirr.buffer = buffer
+    whirr.loop = true
+    const whirrFilter = ac.createBiquadFilter()
+    whirrFilter.type = 'bandpass'
+    whirrFilter.frequency.value = 1100
+    whirrFilter.Q.value = 1.2
+    const whirrGain = ac.createGain()
+    whirrGain.gain.value = 0
+    whirr.connect(whirrFilter).connect(whirrGain).connect(level)
+
+    tone.start()
+    pulse.start()
+    rumble.start(0, 0.3)
+    whirr.start(0, 1.1)
+
+    return {
+      /** on: engine running. load: 0..1, how much grass is going through. speed: 0..1, how fast it's pushed. */
+      set(on: boolean, load: number, speed: number) {
+        const t = ac.currentTime
+        level.gain.setTargetAtTime(on ? 0.11 : 0, t, on ? 0.15 : 0.25)
+        const rpm = 1 + speed * 0.12 - load * 0.08
+        tone.frequency.setTargetAtTime(42 * rpm, t, 0.2)
+        pulse.frequency.setTargetAtTime(21 * rpm, t, 0.2)
+        whirrGain.gain.setTargetAtTime(load * 0.55, t, 0.08)
+      },
+    }
   }
 
   return {
@@ -112,7 +204,7 @@ export function createAudio() {
       } catch {
         // Preference just won't stick.
       }
-      if (ctx && master) master.gain.setTargetAtTime(muted ? 0 : 0.8, ctx.currentTime, 0.05)
+      if (ctx && master) master.gain.setTargetAtTime(muted ? 0 : VOLUME, ctx.currentTime, 0.05)
       return muted
     },
     suspend() {
@@ -121,30 +213,105 @@ export function createAudio() {
     resume() {
       if (ctx?.state === 'suspended') void ctx.resume()
     },
-    /** The clipper closing: a sharp click and a short metallic ring. */
+    /** The nail clipper closing: a sharp click and a short metallic ring. */
     snip() {
       const ac = ensure()
       if (!master) return
       const t = ac.currentTime
       noiseBurst(ac, master, t, 0.035, 'highpass', 3200, 0.7, 0.5)
       for (const [freq, vol] of [[3150, 0.05], [4720, 0.03], [6900, 0.015]] as const) {
-        const osc = ac.createOscillator()
-        osc.frequency.value = freq * (0.98 + Math.random() * 0.04)
-        const gain = ac.createGain()
-        gain.gain.setValueAtTime(vol, t)
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14)
-        osc.connect(gain).connect(master)
-        osc.start(t)
-        osc.stop(t + 0.15)
+        ping(ac, master, t, freq * (0.98 + Math.random() * 0.04), vol, 0.14)
       }
+    },
+    /** Shears closing: two blades scraping past each other, then a dull clack. */
+    shear() {
+      const ac = ensure()
+      if (!master) return
+      const t = ac.currentTime
+      const scrape = noiseBurst(ac, master, t, 0.09, 'bandpass', 2400, 1.4, 0.32)
+      scrape?.frequency.exponentialRampToValueAtTime(5200, t + 0.08)
+      noiseBurst(ac, master, t + 0.075, 0.05, 'lowpass', 900, 0.8, 0.35)
+      for (const [freq, vol] of [[1850, 0.035], [2760, 0.02]] as const) ping(ac, master, t + 0.075, freq * (0.97 + Math.random() * 0.06), vol, 0.12)
+    },
+    /** A sickle cutting through air. */
+    swoosh() {
+      const ac = ensure()
+      if (!master) return
+      const t = ac.currentTime
+      const filter = noiseBurst(ac, master, t, 0.26, 'bandpass', 500, 1.1, 0.28)
+      if (!filter) return
+      filter.frequency.setValueAtTime(500, t)
+      filter.frequency.exponentialRampToValueAtTime(2200, t + 0.1)
+      filter.frequency.exponentialRampToValueAtTime(700, t + 0.25)
     },
     /** Grass brushing. delay lets a falling blade land before it sounds. */
     rustle(volume: number, length = 0.35, delay = 0) {
-      if (!ctx || !master || ctx.state !== 'running') return
-      const pan = ctx.createStereoPanner()
+      const live = running()
+      if (!live) return
+      const pan = live.ac.createStereoPanner()
       pan.pan.value = Math.random() * 0.8 - 0.4
-      pan.connect(master)
-      noiseBurst(ctx, pan, ctx.currentTime + delay, length, 'bandpass', 1400 + Math.random() * 900, 0.6, volume)
+      pan.connect(live.out)
+      noiseBurst(live.ac, pan, live.ac.currentTime + delay, length, 'bandpass', 1400 + Math.random() * 900, 0.6, volume)
+    },
+    /** Keeps the mower engine in step with the game. Cheap to call every frame. */
+    mower(on: boolean, load: number, speed: number) {
+      if (!on && !engine) return
+      const live = running()
+      if (!live || !noise) return
+      engine ??= createEngine(live.ac, live.out, noise)
+      engine.set(on, load, speed)
+    },
+    /** A rising arpeggio and a pop, for reaching a new level. */
+    levelUp() {
+      const ac = ensure()
+      const out = master
+      if (!out) return
+      const t = ac.currentTime
+      noiseBurst(ac, out, t, 0.12, 'bandpass', 1800, 0.7, 0.45)
+      ;[3, 7, 10, 15].forEach((semi, i) => {
+        ping(ac, out, t + 0.05 + i * 0.09, note(semi), 0.11, 0.5, 'triangle')
+        ping(ac, out, t + 0.05 + i * 0.09, note(semi + 12), 0.03, 0.35)
+      })
+      ping(ac, out, t + 0.42, note(15), 0.08, 1.1, 'triangle')
+      ping(ac, out, t + 0.42, note(22), 0.06, 1.1, 'triangle')
+    },
+    /** The last blade: a longer fanfare. */
+    fanfare() {
+      const ac = ensure()
+      if (!master) return
+      const t = ac.currentTime
+      const melody: [number, number][] = [[-2, 0], [2, 0.14], [5, 0.28], [10, 0.42], [5, 0.62], [10, 0.76]]
+      for (const [semi, at] of melody) {
+        ping(ac, master, t + at, note(semi), 0.1, 0.45, 'triangle')
+        ping(ac, master, t + at, note(semi + 12), 0.025, 0.3)
+      }
+      for (const semi of [-2, 2, 5, 10]) ping(ac, master, t + 0.95, note(semi), 0.06, 2, 'triangle')
+    },
+    /** One firework sound `delay` seconds from now. Far ones arrive later and quieter, as sound does. */
+    firework(delay: number, kind: 'launch' | 'burst' | 'crackle', distance: number) {
+      const live = running()
+      if (!live) return
+      const { ac, out } = live
+      const t = ac.currentTime + delay + (kind === 'launch' ? 0 : distance / 343)
+      const volume = Math.min(1, 30 / Math.max(distance, 10))
+      if (kind === 'launch') {
+        const osc = ac.createOscillator()
+        osc.frequency.setValueAtTime(700, t)
+        osc.frequency.exponentialRampToValueAtTime(2100, t + 1.2)
+        const gain = ac.createGain()
+        gain.gain.setValueAtTime(0, t)
+        gain.gain.linearRampToValueAtTime(0.012 * volume, t + 0.1)
+        gain.gain.linearRampToValueAtTime(0, t + 1.3)
+        osc.connect(gain).connect(out)
+        osc.start(t)
+        osc.stop(t + 1.35)
+        noiseBurst(ac, out, t, 0.25, 'highpass', 2500, 0.5, 0.05 * volume)
+      } else if (kind === 'burst') {
+        noiseBurst(ac, out, t, 1.6, 'lowpass', 220, 0.7, 0.9 * volume)
+        noiseBurst(ac, out, t, 0.18, 'lowpass', 1200, 0.5, 0.5 * volume)
+      } else {
+        for (let i = 0; i < 26; i++) noiseBurst(ac, out, t + Math.random() * 1.6, 0.02, 'highpass', 3000 + Math.random() * 3000, 0.7, 0.12 * volume)
+      }
     },
   }
 }

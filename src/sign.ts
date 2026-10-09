@@ -1,8 +1,9 @@
 import { BoxGeometry, CanvasTexture, Group, Mesh, MeshStandardMaterial, SRGBColorSpace } from 'three'
-import { mulberry32 } from './field'
+import { BLADE_COUNT, meadowEdge, mulberry32 } from './field'
 
-/** Where the sign stands: between the spawn point and the meadow, facing the player. */
-export const SIGN = { x: 0, z: 10.4, halfWidth: 1.3 }
+/** Where the sign stands: just outside the south edge of the meadow, facing away from it. */
+export const SIGN = { x: 0, z: Math.ceil(meadowEdge(Math.PI / 2)) + 3.5, halfWidth: 1.3 }
+const TOTAL = BLADE_COUNT.toLocaleString('en-US')
 
 const BOARD_W = 2.6
 const BOARD_H = 1.625
@@ -13,8 +14,8 @@ type SignText = { title: string; lines: string[]; footer?: string }
 
 const WELCOME: SignText = {
   title: 'Welcome, gardener',
-  lines: ['Your job is to cut all the grass.', '5,000 blades. One at a time.', 'All you get is a nail clipper.'],
-  footer: 'WASD walk     Mouse look     Click snip     Shift run     Esc pause',
+  lines: [`Cut all ${TOTAL} blades in this meadow.`, 'You start with a nail clipper.', 'Cut enough and you earn better tools.'],
+  footer: 'WASD walk     Mouse look     Click cut     Shift run     1-4 tools     Esc pause',
 }
 
 /** Painted planks: base colour, grain, knots and seams. */
@@ -157,7 +158,7 @@ export function createSign(maxAnisotropy: number) {
     showFinished(time: string) {
       drawBoard(canvas, {
         title: 'Job done',
-        lines: ['You cut all 5,000 blades.', `It took you ${time}.`, 'The field thanks you.'],
+        lines: [`You cut all ${TOTAL} blades.`, `It took you ${time}.`, 'The meadow thanks you.'],
       })
       face.needsUpdate = true
     },

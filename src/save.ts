@@ -1,64 +1,76 @@
 import { z } from 'zod'
 import { BLADE_COUNT } from './field'
+import { SIGN } from './sign'
+import { TOOLS } from './tools'
 
-// Progress lives in localStorage as JSON. Cut blades and the way each one fell are two bitsets
-// (625 bytes each for 5,000 blades), so a save is under 2 KB and cheap enough to write after every snip.
+// Progress lives in localStorage as JSON. Cut blades are a bitset (25 KB for 200,000 blades), so a save
+// is small enough to write every few seconds while you play.
 
 /** Bump when field generation changes: old bitsets would point at different blades. */
-const SAVE_VERSION = 1
+const SAVE_VERSION = 2
 export const SAVE_KEY = 'grass-cutter/save'
 const CUT_BYTES = Math.ceil(BLADE_COUNT / 8)
 
-/** First-time spawn: in front of the welcome sign, looking at it. */
-export const SPAWN = { x: 0, z: 13.3, yaw: 0, pitch: -0.1 }
+/** First-time spawn: in front of the welcome sign, looking at it and the meadow behind it. */
+export const SPAWN = { x: 0, z: SIGN.z + 2.9, yaw: 0, pitch: -0.1 }
 
 const PlayerSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number(), pitch: z.number() })
 
 const SaveSchema = z.object({
   version: z.literal(SAVE_VERSION),
   cut: z.base64(),
-  // Which way clippings fell is cosmetic, so a broken value just means they all fell forward.
-  fellBack: z.base64().catch(''),
-  // A broken position or timer shouldn't cost anyone their progress.
+  // A broken position, timer or tool shouldn't cost anyone their progress.
   player: PlayerSchema.catch(SPAWN),
   playSeconds: z.number().nonnegative().catch(0),
+  tool: z
+    .number()
+    .int()
+    .min(0)
+    .max(TOOLS.length - 1)
+    .catch(0),
+  /** When the last blade fell, in ms since the epoch. */
+  finishedAt: z.number().nullable().catch(null),
 })
 
 export type PlayerState = z.infer<typeof PlayerSchema>
 
-/** Per-blade state: standing, cut and fell forward, or cut and fell backward. */
-export const BLADE = { standing: 0, fellForward: 1, fellBack: 2 } as const
-
 export type Save = {
-  /** One BLADE value per blade. */
+  /** 1 for every cut blade. */
   cut: Uint8Array
   player: PlayerState
   playSeconds: number
+  /** Index into TOOLS of the tool in hand. */
+  tool: number
+  finishedAt: number | null
 }
 
-function encodeBits(cut: Uint8Array, test: (state: number) => boolean) {
+function encodeBits(cut: Uint8Array) {
   const bits = new Uint8Array(CUT_BYTES)
-  for (let i = 0; i < BLADE_COUNT; i++) if (test(cut[i])) bits[i >> 3] |= 1 << (i & 7)
-  return btoa(String.fromCharCode(...bits))
+  for (let i = 0; i < BLADE_COUNT; i++) if (cut[i]) bits[i >> 3] |= 1 << (i & 7)
+  // In slices: spreading 25 KB of arguments at once can overflow the call stack.
+  let binary = ''
+  for (let i = 0; i < bits.length; i += 8192) binary += String.fromCharCode(...bits.subarray(i, i + 8192))
+  return btoa(binary)
 }
 
 /** Null unless the string holds exactly one bit per blade. */
 function decodeBits(base64: string) {
   const bytes = atob(base64)
   if (bytes.length !== CUT_BYTES) return null
-  const bits = new Uint8Array(BLADE_COUNT)
-  for (let i = 0; i < BLADE_COUNT; i++) bits[i] = (bytes.charCodeAt(i >> 3) >> (i & 7)) & 1
-  return bits
+  const cut = new Uint8Array(BLADE_COUNT)
+  for (let i = 0; i < BLADE_COUNT; i++) cut[i] = (bytes.charCodeAt(i >> 3) >> (i & 7)) & 1
+  return cut
 }
 
 export function encodeSave(save: Save): string {
   const finite = Object.values(save.player).every(Number.isFinite)
   return JSON.stringify({
     version: SAVE_VERSION,
-    cut: encodeBits(save.cut, (state) => state !== BLADE.standing),
-    fellBack: encodeBits(save.cut, (state) => state === BLADE.fellBack),
+    cut: encodeBits(save.cut),
     player: finite ? save.player : SPAWN,
     playSeconds: Number.isFinite(save.playSeconds) ? save.playSeconds : 0,
+    tool: save.tool,
+    finishedAt: save.finishedAt,
   } satisfies z.input<typeof SaveSchema>)
 }
 
@@ -75,9 +87,8 @@ export function decodeSave(raw: string): Save | null {
 
   const cut = decodeBits(parsed.data.cut)
   if (!cut) return null
-  const back = decodeBits(parsed.data.fellBack)
-  for (let i = 0; i < BLADE_COUNT; i++) if (cut[i] && back?.[i]) cut[i] = BLADE.fellBack
-  return { cut, player: parsed.data.player, playSeconds: parsed.data.playSeconds }
+  const { player, playSeconds, tool, finishedAt } = parsed.data
+  return { cut, player, playSeconds, tool, finishedAt }
 }
 
 export function loadSave(): Save | null {

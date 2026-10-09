@@ -5,7 +5,8 @@ import { SIGN } from './sign'
 const EYE_HEIGHT = 1.68
 const WALK_SPEED = 2.6
 const RUN_SPEED = 4.8
-const WORLD_RADIUS = 30
+/** How far from the meadow's centre you can walk. The trees start just beyond. */
+const WORLD_RADIUS = 64
 const BODY_RADIUS = 0.35
 const SENSITIVITY = 0.0022
 /** Radians of bob phase per metre walked: roughly one step every 0.7 m. */
@@ -58,6 +59,10 @@ export function createPlayer(start: PlayerState) {
     state,
     get bob() {
       return bob
+    },
+    /** Metres per second over the ground. */
+    get speed() {
+      return Math.hypot(vx, vz)
     },
     keyDown(code: string) {
       held.add(code)

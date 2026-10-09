@@ -2,16 +2,16 @@
 
 exports[`field > generates the same meadow every time 1`] = `
 [
-  "-0.9183",
-  "-2.0177",
-  "1.9776",
+  "-6.8369",
+  "-55.5592",
+  "1.2273",
 ]
 `;
 
 exports[`field > generates the same meadow every time 2`] = `
 [
-  "-27.00",
-  "-236.99",
-  "15678.49",
+  "3798",
+  "-1120",
+  "627356",
 ]
 `;

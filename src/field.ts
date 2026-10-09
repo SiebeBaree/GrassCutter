@@ -1,20 +1,31 @@
-// The meadow: where every blade stands, how it bends and how to find the blade under the crosshair.
+// The meadow: where every blade stands, how it bends and how to find blades near a point or under the crosshair.
 // Saves refer to blades by index, so generation must stay deterministic. Bump SAVE_VERSION in save.ts
 // whenever anything here changes the layout.
 
-export const BLADE_COUNT = 5000
-export const FIELD_RADIUS = 7.6
+export const BLADE_COUNT = 200_000
+/** Blades stand on a jittered grid, at most one per cell. */
+export const CELL = 0.2
+/** Half the side of the square map in metres. The meadow and everything you can walk on fit inside. */
+export const MAP_HALF = 66
+export const CELLS = Math.round((MAP_HALF * 2) / CELL)
+/** Side of a render chunk in metres. */
+export const CHUNK = 12
+export const CHUNKS = Math.round((MAP_HALF * 2) / CHUNK)
+export const CELLS_PER_CHUNK = Math.round(CHUNK / CELL)
+/** Meadow radius before the edge wobble. Generation scales the edge so exactly BLADE_COUNT blades fit. */
+export const MEADOW_RADIUS = 50.5
+/** How far the edge frays, as a fraction of the radius. */
+const EDGE_FRAY = 0.035
+
 export const STUB_HEIGHT = 0.06
 export const WIND_DIR = { x: 0.928, z: 0.371 }
 export const PUSH_RADIUS = 0.9
 export const PUSH_STRENGTH = 0.32
 
-/** Rows of vertices along a blade. Picking walks the same rows the shader draws. */
-export const BLADE_SEGMENTS = 8
+/** Rows of vertices along a near blade. Picking walks the same rows the shader draws. */
+export const BLADE_SEGMENTS = 7
 
-const SEED = 0x9a55
-const GRID_HALF = 9.5
-const GRID_CELLS = 40
+const SEED = 0x9a56
 
 export type Field = {
   x: Float32Array
@@ -24,21 +35,19 @@ export type Field = {
   width: Float32Array
   bend: Float32Array
   tint: Float32Array
-}
-
-/** Uniform grid over the meadow in CSR layout: blades of cell c are items[start[c]..start[c + 1]). */
-export type Grid = {
-  half: number
-  cells: number
-  size: number
-  start: Int32Array
-  items: Int32Array
+  /** Grid cell of each blade. */
   cellOf: Int32Array
+  /** Blade in each grid cell, or -1. */
+  cellBlade: Int32Array
+  /** Blades of chunk k are [chunkStart[k], chunkStart[k + 1]). Chunks run row by row along x. */
+  chunkStart: Int32Array
+  /** The meadow edge is meadowEdge(angle) * edgeScale. */
+  edgeScale: number
 }
 
 export type Vec2 = { x: number; z: number }
 
-/** Small, fast seeded PRNG. Same seed, same field, forever. */
+/** Small, fast seeded PRNG. Same seed, same sequence, forever. */
 export function mulberry32(seed: number) {
   let a = seed >>> 0
   return () => {
@@ -50,16 +59,47 @@ export function mulberry32(seed: number) {
   }
 }
 
-/** Organic meadow outline: radius at a given angle. */
+/** Stateless hash to [0, 1). Each grid cell draws its own numbers, so cells don't depend on each other. */
+function cellRandom(cell: number, k: number) {
+  let n = (cell * 8 + k + SEED) | 0
+  n = Math.imul(n ^ (n >>> 16), 0x7feb352d)
+  n = Math.imul(n ^ (n >>> 15), 0x846ca68b)
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296
+}
+
+/** Organic meadow outline: radius at a given angle, before edgeScale. */
 export function meadowEdge(angle: number) {
   return (
-    FIELD_RADIUS *
-    (1 + 0.07 * Math.sin(3 * angle + 1.1) + 0.05 * Math.sin(5 * angle + 2.3) + 0.025 * Math.sin(11 * angle + 0.4))
+    MEADOW_RADIUS *
+    (1 +
+      0.07 * Math.sin(3 * angle + 1.1) +
+      0.05 * Math.sin(5 * angle + 2.3) +
+      0.025 * Math.sin(11 * angle + 0.4) +
+      0.012 * Math.sin(23 * angle + 2.9))
   )
 }
 
+/** Slow swells of taller and shorter grass across the meadow. */
+function heightSwell(x: number, z: number) {
+  return 0.09 * Math.sin(x * 0.11 + 0.7) * Math.sin(z * 0.13 + 1.9) + 0.06 * Math.sin(x * 0.047 - z * 0.061 + 2.4)
+}
+
 export function createField(): Field {
-  const rand = mulberry32(SEED)
+  const total = CELLS * CELLS
+  const px = new Float32Array(total)
+  const pz = new Float32Array(total)
+  const score = new Float64Array(total)
+  for (let c = 0; c < total; c++) {
+    const x = ((c % CELLS) + 0.05 + 0.9 * cellRandom(c, 0)) * CELL - MAP_HALF
+    const z = (Math.floor(c / CELLS) + 0.05 + 0.9 * cellRandom(c, 1)) * CELL - MAP_HALF
+    px[c] = x
+    pz[c] = z
+    // Below 1 is inside the outline. The noise frays the edge so the meadow doesn't end in a wall.
+    score[c] = Math.hypot(x, z) / meadowEdge(Math.atan2(z, x)) + (cellRandom(c, 2) - 0.5) * EDGE_FRAY * 2
+  }
+  // Keep the BLADE_COUNT cells that sit furthest inside.
+  const edgeScale = score.slice().sort()[BLADE_COUNT - 1]
+
   const field: Field = {
     x: new Float32Array(BLADE_COUNT),
     z: new Float32Array(BLADE_COUNT),
@@ -68,52 +108,74 @@ export function createField(): Field {
     width: new Float32Array(BLADE_COUNT),
     bend: new Float32Array(BLADE_COUNT),
     tint: new Float32Array(BLADE_COUNT),
+    cellOf: new Int32Array(BLADE_COUNT),
+    cellBlade: new Int32Array(total).fill(-1),
+    chunkStart: new Int32Array(CHUNKS * CHUNKS + 1),
+    edgeScale,
   }
 
-  const bound = FIELD_RADIUS * 1.2
+  const cells: number[] = []
   let n = 0
-  while (n < BLADE_COUNT) {
-    const x = (rand() * 2 - 1) * bound
-    const z = (rand() * 2 - 1) * bound
-    const r = Math.hypot(x, z)
-    const edge = meadowEdge(Math.atan2(z, x))
-    if (r > edge) continue
-    // Thin out the outer metre so the meadow fades instead of ending in a wall.
-    if (r > edge - 1 && rand() > edge - r) continue
-
-    field.x[n] = x
-    field.z[n] = z
-    field.yaw[n] = rand() * Math.PI * 2
-    field.height[n] = 1.8 + rand() * 0.5
-    field.width[n] = 0.045 + rand() * 0.035
-    field.bend[n] = 0.06 + rand() * rand() * 0.3
-    field.tint[n] = rand()
-    n++
+  for (let k = 0; k < CHUNKS * CHUNKS; k++) {
+    field.chunkStart[k] = n
+    const cx0 = (k % CHUNKS) * CELLS_PER_CHUNK
+    const cz0 = Math.floor(k / CHUNKS) * CELLS_PER_CHUNK
+    cells.length = 0
+    for (let cz = cz0; cz < cz0 + CELLS_PER_CHUNK; cz++) {
+      for (let cx = cx0; cx < cx0 + CELLS_PER_CHUNK; cx++) {
+        const c = cz * CELLS + cx
+        if (score[c] <= edgeScale && n + cells.length < BLADE_COUNT) cells.push(c)
+      }
+    }
+    // Shuffle so any prefix of a chunk is an even sprinkle. Distant chunks draw only a prefix.
+    const rand = mulberry32(SEED + k)
+    for (let j = cells.length - 1; j > 0; j--) {
+      const r = Math.floor(rand() * (j + 1))
+      ;[cells[j], cells[r]] = [cells[r], cells[j]]
+    }
+    for (const c of cells) {
+      const i = n++
+      const x = px[c]
+      const z = pz[c]
+      field.x[i] = x
+      field.z[i] = z
+      field.yaw[i] = cellRandom(c, 3) * Math.PI * 2
+      field.height[i] = 1.02 + cellRandom(c, 4) * 0.42 + heightSwell(x, z)
+      field.width[i] = 0.05 + cellRandom(c, 5) * 0.035
+      field.bend[i] = 0.06 + cellRandom(c, 6) ** 2 * 0.3
+      field.tint[i] = cellRandom(c, 7)
+      field.cellOf[i] = c
+      field.cellBlade[c] = i
+    }
   }
+  field.chunkStart[CHUNKS * CHUNKS] = n
+  if (n !== BLADE_COUNT) throw new Error(`Meadow has ${n} blades, expected ${BLADE_COUNT}`)
   return field
 }
 
-export function createGrid(field: Field): Grid {
-  const size = (GRID_HALF * 2) / GRID_CELLS
-  const total = GRID_CELLS * GRID_CELLS
-  const cellOf = new Int32Array(BLADE_COUNT)
-  const counts = new Int32Array(total + 1)
-  for (let i = 0; i < BLADE_COUNT; i++) {
-    const cx = clampInt(Math.floor((field.x[i] + GRID_HALF) / size), GRID_CELLS)
-    const cz = clampInt(Math.floor((field.z[i] + GRID_HALF) / size), GRID_CELLS)
-    cellOf[i] = cz * GRID_CELLS + cx
-    counts[cellOf[i] + 1]++
-  }
-  const start = new Int32Array(total + 1)
-  for (let c = 0; c < total; c++) start[c + 1] = start[c] + counts[c + 1]
-  const fill = start.slice(0, total)
-  const items = new Int32Array(BLADE_COUNT)
-  for (let i = 0; i < BLADE_COUNT; i++) items[fill[cellOf[i]]++] = i
-  return { half: GRID_HALF, cells: GRID_CELLS, size, start, items, cellOf }
+function clampCell(v: number) {
+  return Math.min(CELLS - 1, Math.max(0, v))
 }
 
-function clampInt(v: number, cells: number) {
-  return Math.min(cells - 1, Math.max(0, v))
+/** Grid cell column or row for a world coordinate, clamped to the map. */
+export function cellCoord(v: number) {
+  return clampCell(Math.floor((v + MAP_HALF) / CELL))
+}
+
+/** Calls visit for every standing blade whose base is within r of (x, z). */
+export function forEachStandingNear(field: Field, cut: Uint8Array, x: number, z: number, r: number, visit: (i: number) => void) {
+  const r2 = r * r
+  const maxX = cellCoord(x + r)
+  const maxZ = cellCoord(z + r)
+  for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
+    for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
+      const i = field.cellBlade[cz * CELLS + cx]
+      if (i < 0 || cut[i]) continue
+      const dx = field.x[i] - x
+      const dz = field.z[i] - z
+      if (dx * dx + dz * dz <= r2) visit(i)
+    }
+  }
 }
 
 function smoothstep(e0: number, e1: number, v: number) {
@@ -128,7 +190,8 @@ export function bladeTaper(t: number) {
 
 /**
  * Horizontal lean (per unit of t² · height) from wind and from the player brushing through.
- * Mirrors bladeLean() in the grass shader so picking hits exactly what is drawn.
+ * Mirrors bladeLean() in the grass shader so picking hits exactly what is drawn. The shader also bends
+ * blades away from the lawn mower, but the mower is parked out of reach whenever picking runs.
  */
 export function bladeLean(bx: number, bz: number, time: number, player: Vec2, out: Vec2) {
   const gust = 0.55 + 0.45 * Math.sin(time * 0.55 - (bx * WIND_DIR.x + bz * WIND_DIR.z) * 0.22)
@@ -149,80 +212,75 @@ export function bladeLean(bx: number, bz: number, time: number, player: Vec2, ou
 
 export type Ray = { ox: number; oy: number; oz: number; dx: number; dy: number; dz: number }
 
+/** Where the crosshair landed: the blade and the distance along the ray. */
+export type Pick = { blade: number; s: number }
+
 const lean: Vec2 = { x: 0, z: 0 }
 const px = new Float32Array(BLADE_SEGMENTS + 1)
 const py = new Float32Array(BLADE_SEGMENTS + 1)
 const pz = new Float32Array(BLADE_SEGMENTS + 1)
 const PICK_TOLERANCE = 0.025
+/** No blade tip strays further than this from its base. */
+const MAX_TIP_OFFSET = 1.3
 
 /**
- * Finds the nearest standing blade along the ray within reach, or -1.
+ * Finds the nearest standing blade along the ray within reach. Writes it to `out` and returns true, or returns false.
  * Only checks grid cells near the ray, then tests the blade's bent centreline segment by segment.
  */
-export function pickBlade(
-  field: Field,
-  grid: Grid,
-  cut: Uint8Array,
-  ray: Ray,
-  reach: number,
-  time: number,
-  player: Vec2,
-): number {
+export function pickBlade(field: Field, cut: Uint8Array, ray: Ray, reach: number, time: number, player: Vec2, out: Pick) {
   // Never pick through the ground.
   let maxS = reach
   if (ray.dy < 0) maxS = Math.min(maxS, -ray.oy / ray.dy)
 
   const ex = ray.ox + ray.dx * maxS
   const ez = ray.oz + ray.dz * maxS
-  const margin = 1.9
-  const minCx = clampInt(Math.floor((Math.min(ray.ox, ex) - margin + grid.half) / grid.size), grid.cells)
-  const maxCx = clampInt(Math.floor((Math.max(ray.ox, ex) + margin + grid.half) / grid.size), grid.cells)
-  const minCz = clampInt(Math.floor((Math.min(ray.oz, ez) - margin + grid.half) / grid.size), grid.cells)
-  const maxCz = clampInt(Math.floor((Math.max(ray.oz, ez) + margin + grid.half) / grid.size), grid.cells)
+  const minCx = cellCoord(Math.min(ray.ox, ex) - MAX_TIP_OFFSET)
+  const maxCx = cellCoord(Math.max(ray.ox, ex) + MAX_TIP_OFFSET)
+  const minCz = cellCoord(Math.min(ray.oz, ez) - MAX_TIP_OFFSET)
+  const maxCz = cellCoord(Math.max(ray.oz, ez) + MAX_TIP_OFFSET)
 
   let best = -1
   let bestS = maxS
 
   for (let cz = minCz; cz <= maxCz; cz++) {
     for (let cx = minCx; cx <= maxCx; cx++) {
-      const c = cz * grid.cells + cx
-      for (let k = grid.start[c]; k < grid.start[c + 1]; k++) {
-        const i = grid.items[k]
-        if (cut[i]) continue
+      const i = field.cellBlade[cz * CELLS + cx]
+      if (i < 0 || cut[i]) continue
 
-        const bx = field.x[i]
-        const bz = field.z[i]
-        const h = field.height[i]
-        bladeLean(bx, bz, time, player, lean)
-        const fx = Math.sin(field.yaw[i]) * field.bend[i] + lean.x
-        const fz = Math.cos(field.yaw[i]) * field.bend[i] + lean.z
+      const bx = field.x[i]
+      const bz = field.z[i]
+      const h = field.height[i]
+      bladeLean(bx, bz, time, player, lean)
+      const fx = Math.sin(field.yaw[i]) * field.bend[i] + lean.x
+      const fz = Math.cos(field.yaw[i]) * field.bend[i] + lean.z
 
-        // Cheap reject: the blade never strays further than its tip offset from its base.
-        const reachXZ = Math.hypot(fx, fz) * h + 0.1
-        if (distToSegment2D(bx, bz, ray.ox, ray.oz, ex, ez) > reachXZ) continue
+      // Cheap reject: the blade never strays further than its tip offset from its base.
+      const reachXZ = Math.hypot(fx, fz) * h + 0.1
+      if (distToSegment2D(bx, bz, ray.ox, ray.oz, ex, ez) > reachXZ) continue
 
-        for (let r = 0; r <= BLADE_SEGMENTS; r++) {
-          const t = r / BLADE_SEGMENTS
-          const w = t * t * h
-          px[r] = bx + fx * w
-          py[r] = t * h
-          pz[r] = bz + fz * w
-        }
+      for (let r = 0; r <= BLADE_SEGMENTS; r++) {
+        const t = r / BLADE_SEGMENTS
+        const w = t * t * h
+        px[r] = bx + fx * w
+        py[r] = t * h
+        pz[r] = bz + fz * w
+      }
 
-        const w = field.width[i] * 0.5
-        for (let r = 0; r < BLADE_SEGMENTS; r++) {
-          const s = raySegment(ray, px[r], py[r], pz[r], px[r + 1], py[r + 1], pz[r + 1])
-          if (s.s < 0.05 || s.s >= bestS) continue
-          const t = (r + s.u) / BLADE_SEGMENTS
-          if (s.dist < w * bladeTaper(t) + PICK_TOLERANCE) {
-            best = i
-            bestS = s.s
-          }
+      const w = field.width[i] * 0.5
+      for (let r = 0; r < BLADE_SEGMENTS; r++) {
+        const s = raySegment(ray, px[r], py[r], pz[r], px[r + 1], py[r + 1], pz[r + 1])
+        if (s.s < 0.05 || s.s >= bestS) continue
+        const t = (r + s.u) / BLADE_SEGMENTS
+        if (s.dist < w * bladeTaper(t) + PICK_TOLERANCE) {
+          best = i
+          bestS = s.s
         }
       }
     }
   }
-  return best
+  out.blade = best
+  out.s = bestS
+  return best >= 0
 }
 
 function distToSegment2D(x: number, z: number, ax: number, az: number, bx: number, bz: number) {

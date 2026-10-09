@@ -3,12 +3,15 @@ import {
   BufferGeometry,
   Color,
   ConeGeometry,
+  CubeCamera,
   CylinderGeometry,
   DirectionalLight,
   DodecahedronGeometry,
   Fog,
+  HalfFloatType,
   IcosahedronGeometry,
   InstancedMesh,
+  LinearFilter,
   Matrix4,
   Mesh,
   MeshStandardMaterial,
@@ -22,13 +25,14 @@ import {
   UniformsLib,
   UniformsUtils,
   Vector3,
-  type DataTexture,
+  WebGLCubeRenderTarget,
+  type Texture,
   type Vector2,
   type WebGLRenderer,
 } from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
-import { FIELD_RADIUS, mulberry32 } from './field'
-import { FOG_COLOR, FOG_FAR, FOG_NEAR, lightUniforms, SUN_COLOR, SUN_DIR, SUN_INTENSITY } from './light'
+import { MEADOW_RADIUS, mulberry32 } from './field'
+import { FOG_COLOR, FOG_FAR, FOG_NEAR, lightUniforms, setDaylight, SUN_COLOR, SUN_DIR, SUN_INTENSITY } from './light'
 
 const noiseGlsl = /* glsl */ `
   float hash(vec2 p) {
@@ -54,27 +58,22 @@ const noiseGlsl = /* glsl */ `
   }
 `
 
-function createSky() {
-  const fog = { r: 0, g: 0, b: 0 }
-  FOG_COLOR.getRGB(fog, SRGBColorSpace)
+/**
+ * Renders the daytime sky with clouds into a cube map once. Drawing the sky each frame is then one
+ * texture lookup per pixel instead of ten octaves of noise.
+ */
+function bakeDaySky(renderer: WebGLRenderer) {
   const material = new ShaderMaterial({
-    uniforms: {
-      uSunDir: lightUniforms.uSunDir,
-      uFogColor: { value: new Color(fog.r, fog.g, fog.b) },
-      uTime: { value: 0 },
-    },
+    uniforms: { uSunDir: lightUniforms.uSunDir },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
       void main() {
         vDir = position;
-        vec4 p = projectionMatrix * viewMatrix * vec4(position + cameraPosition, 1.0);
-        gl_Position = p.xyww;
+        gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: /* glsl */ `
       uniform vec3 uSunDir;
-      uniform vec3 uFogColor;
-      uniform float uTime;
       varying vec3 vDir;
       ${noiseGlsl}
       void main() {
@@ -85,7 +84,7 @@ function createSky() {
         col += vec3(1.0, 0.8, 0.55) * (pow(s, 6.0) * 0.22 + pow(s, 80.0) * 0.7);
 
         if (d.y > 0.0) {
-          vec2 uv = d.xz / (d.y + 0.1) * 1.1 + vec2(uTime * 0.006, uTime * 0.002);
+          vec2 uv = d.xz / (d.y + 0.1) * 1.1;
           float c = fbm(uv);
           c = smoothstep(0.52, 0.8, c) * smoothstep(0.02, 0.35, d.y);
           float lit = 0.85 + 0.35 * smoothstep(0.5, 0.75, fbm(uv + uSunDir.xz * 0.15));
@@ -93,7 +92,64 @@ function createSky() {
           col = mix(col, cloud, c * 0.92);
         }
         col += vec3(1.0, 0.95, 0.85) * smoothstep(0.99975, 0.9999, s) * 30.0;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+    side: BackSide,
+    depthWrite: false,
+  })
+  const scene = new Scene()
+  const sphere = new Mesh(new SphereGeometry(10, 64, 32), material)
+  scene.add(sphere)
+  const target = new WebGLCubeRenderTarget(512, { type: HalfFloatType, generateMipmaps: false, minFilter: LinearFilter })
+  new CubeCamera(1, 100, target).update(renderer, scene)
+  sphere.geometry.dispose()
+  material.dispose()
+  return target.texture
+}
 
+/** The visible sky: the baked day sky, faded into a starry night by uDaylight. */
+function createSky(daySky: Texture) {
+  const material = new ShaderMaterial({
+    uniforms: {
+      uDaySky: { value: daySky },
+      uDaylight: { value: 1 },
+      uFogColor: { value: new Color() },
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vDir;
+      void main() {
+        vDir = position;
+        vec4 p = projectionMatrix * viewMatrix * vec4(position + cameraPosition, 1.0);
+        gl_Position = p.xyww;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform samplerCube uDaySky;
+      uniform float uDaylight;
+      uniform vec3 uFogColor;
+      varying vec3 vDir;
+
+      float hash3(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+
+      void main() {
+        vec3 d = normalize(vDir);
+        vec3 col = textureCube(uDaySky, d).rgb;
+        if (uDaylight < 1.0) {
+          float h = max(d.y, 0.0);
+          vec3 night = mix(vec3(0.03, 0.04, 0.09), vec3(0.004, 0.007, 0.02), pow(h, 0.5));
+          // Stars: one candidate per cell of a grid on the sky, most of them dark.
+          vec3 cell = floor(d * 220.0);
+          float star = hash3(cell);
+          vec3 offset = d * 220.0 - cell - 0.5;
+          float twinkle = 0.7 + 0.3 * hash3(cell + 7.0);
+          night += vec3(0.9, 0.95, 1.0) * smoothstep(0.985, 1.0, star) * smoothstep(0.3, 0.0, length(offset)) * twinkle * 2.5 * smoothstep(0.0, 0.25, d.y);
+          col = mix(night, col, uDaylight);
+        }
         gl_FragColor = vec4(col, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -109,25 +165,27 @@ function createSky() {
   return sky
 }
 
-function createGround(density: { texture: DataTexture; rect: { value: Vector2 } }) {
-  const geometry = new PlaneGeometry(700, 700, 220, 220)
+type GroundUniforms = {
+  uDensity: { value: Texture }
+  uDensityRect: { value: Vector2 }
+  uNoise: { value: Texture }
+  uTime: { value: number }
+}
+
+function createGround(shared: GroundUniforms, edgeScale: number) {
+  const geometry = new PlaneGeometry(1000, 1000, 250, 250)
   geometry.rotateX(-Math.PI / 2)
   const material = new ShaderMaterial({
-    uniforms: {
-      ...UniformsUtils.clone(UniformsLib.fog),
-      ...lightUniforms,
-      uDensity: { value: density.texture },
-      uDensityRect: density.rect,
-    },
+    uniforms: { ...UniformsUtils.clone(UniformsLib.fog), ...lightUniforms, ...shared },
     vertexShader: /* glsl */ `
       varying vec3 vWorldPos;
       #include <fog_pars_vertex>
-      // Flat play area, rolling hills from 70 m out.
+      // Flat play area, rolling hills from 90 m out.
       float hillHeight(vec2 p) {
         float r = length(p);
         float a = atan(p.y, p.x);
         float n = 0.55 + 0.25 * sin(a * 3.0 + 0.7) + 0.15 * sin(a * 7.0 + 2.1) + 0.08 * sin(a * 13.0 + 4.2);
-        return smoothstep(70.0, 170.0, r) * n * 34.0;
+        return smoothstep(90.0, 230.0, r) * n * 42.0;
       }
       void main() {
         vec3 p = (modelMatrix * vec4(position, 1.0)).xyz;
@@ -144,12 +202,13 @@ function createGround(density: { texture: DataTexture; rect: { value: Vector2 } 
       uniform vec3 uSkyColor;
       uniform sampler2D uDensity;
       uniform vec2 uDensityRect;
+      uniform sampler2D uNoise;
+      uniform float uTime;
       varying vec3 vWorldPos;
       #include <fog_pars_fragment>
-      ${noiseGlsl}
 
       float meadowEdge(float a) {
-        return ${FIELD_RADIUS.toFixed(2)} * (1.0 + 0.07 * sin(3.0 * a + 1.1) + 0.05 * sin(5.0 * a + 2.3) + 0.025 * sin(11.0 * a + 0.4));
+        return ${(MEADOW_RADIUS * edgeScale).toFixed(3)} * (1.0 + 0.07 * sin(3.0 * a + 1.1) + 0.05 * sin(5.0 * a + 2.3) + 0.025 * sin(11.0 * a + 0.4) + 0.012 * sin(23.0 * a + 2.9));
       }
 
       void main() {
@@ -157,27 +216,43 @@ function createGround(density: { texture: DataTexture; rect: { value: Vector2 } 
         vec3 N = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
         if (N.y < 0.0) N = -N;
         float dist = length(cameraPosition - vWorldPos);
-        float detailFade = 1.0 - smoothstep(8.0, 45.0, dist);
+        float detailFade = 1.0 - smoothstep(8.0, 60.0, dist);
 
-        float large = fbm(p * 0.07);
-        float detail = noise(p * 2.7) * 0.6 + noise(p * 11.0) * 0.4;
+        float large = texture2D(uNoise, p * 0.004).g;
+        float medium = texture2D(uNoise, p * 0.05).b;
+        float fine = texture2D(uNoise, p * 0.45).a;
+        float detail = medium * 0.6 + fine * 0.4;
+
+        // Short lawn around the meadow.
         vec3 albedo = mix(vec3(0.05, 0.12, 0.02), vec3(0.12, 0.2, 0.035), large);
-        albedo *= 1.0 + (detail - 0.5) * 0.45 * detailFade;
-        float dirt = smoothstep(0.6, 0.72, fbm(p * 0.18 + 7.0));
-        albedo = mix(albedo, vec3(0.13, 0.09, 0.05) * (0.85 + 0.3 * detail), dirt * 0.55);
+        albedo *= 1.0 + (detail - 0.5) * 0.5 * detailFade;
+        float dirt = smoothstep(0.66, 0.78, texture2D(uNoise, p * 0.012 + 0.37).b);
+        albedo = mix(albedo, vec3(0.13, 0.09, 0.05) * (0.85 + 0.3 * detail), dirt * 0.5);
 
-        // Inside the meadow: soil and straw-coloured stubble where the grass grew.
-        float r = length(p);
-        float meadow = 1.0 - smoothstep(-0.6, 0.6, r - meadowEdge(atan(p.y, p.x)));
-        vec3 stubble = mix(vec3(0.11, 0.09, 0.045), vec3(0.2, 0.19, 0.07), noise(p * 6.0) * 0.7 + large * 0.3);
-        albedo = mix(albedo, stubble, meadow * 0.8);
+        // Inside the meadow: dark soil under standing grass, fresh-cut stubble where it's gone.
+        vec4 dens = texture2D(uDensity, (p + uDensityRect.x) * uDensityRect.y);
+        float density = dens.r;
+        float meadow = 1.0 - smoothstep(-0.8, 0.8, length(p) - meadowEdge(atan(p.y, p.x)));
+        vec3 soil = vec3(0.075, 0.058, 0.032) * (0.8 + 0.4 * detail);
+        // Far away the grass is drawn sparser, so the ground beneath takes on its colour.
+        soil = mix(soil, vec3(0.06, 0.12, 0.022), smoothstep(20.0, 45.0, dist));
+        vec3 stubble = mix(vec3(0.11, 0.19, 0.04), vec3(0.21, 0.25, 0.075), fine * 0.5 + medium * 0.3 + large * 0.4);
+        // Fine grain of short grass up close.
+        float grain = texture2D(uNoise, p * 2.3).a * 0.6 + texture2D(uNoise, p * 5.1).b * 0.4;
+        stubble *= 1.0 + (grain - 0.5) * 0.45 * detailFade;
+        // Mowing stripes: grass laid down away from you looks lighter.
+        vec2 mowed = dens.gb * 2.0 - 1.0;
+        float mowedLength = length(mowed);
+        if (mowedLength > 0.2) {
+          vec2 toView = normalize(p - cameraPosition.xz);
+          stubble *= 1.0 + 0.22 * dot(mowed / mowedLength, toView);
+        }
+        albedo = mix(albedo, mix(stubble, soil, density), meadow);
 
-        // Shade under standing grass. Brightens as blades get cut.
-        float density = texture2D(uDensity, (p + uDensityRect.x) * uDensityRect.y).r;
         float shade = mix(1.0, 0.18, density);
-
+        float clouds = mix(1.0, 0.55, smoothstep(0.52, 0.74, texture2D(uNoise, p * 0.0035 + uTime * vec2(0.0021, 0.0008)).r));
         float diffuse = max(dot(N, uSunDir), 0.0);
-        vec3 color = albedo * (uSkyColor * mix(1.0, 0.45, density) + uSunColor * diffuse * shade);
+        vec3 color = albedo * (uSkyColor * mix(1.0, 0.45, density) + uSunColor * diffuse * shade * clouds);
         gl_FragColor = vec4(color, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -186,10 +261,12 @@ function createGround(density: { texture: DataTexture; rect: { value: Vector2 } 
     `,
     fog: true,
   })
-  return new Mesh(geometry, material)
+  const ground = new Mesh(geometry, material)
+  ground.matrixAutoUpdate = false
+  return ground
 }
 
-/** Ring of low-poly trees and a few rocks around the play area. */
+/** Ring of low-poly trees and a few rocks around the meadow. */
 function createScenery() {
   const rand = mulberry32(0x7ee5)
   const pines: Matrix4[] = []
@@ -198,12 +275,12 @@ function createScenery() {
   const q = new Quaternion()
   const up = new Vector3(0, 1, 0)
 
-  for (let i = 0; i < 110; i++) {
+  for (let i = 0; i < 230; i++) {
     const angle = rand() * Math.PI * 2
-    const r = 33 + rand() * 32
+    const r = 70 + rand() * rand() * 70
     const x = Math.cos(angle) * r
     const z = Math.sin(angle) * r
-    const scale = 0.8 + rand() * 0.6
+    const scale = 0.9 + rand() * 0.9
     q.setFromAxisAngle(up, rand() * Math.PI * 2)
     const trunkHeight = (rand() < 0.55 ? 2.0 : 3.0) * scale
     const isPine = rand() < 0.55
@@ -229,10 +306,10 @@ function createScenery() {
   ]
 
   const rocks: Matrix4[] = []
-  for (let i = 0; i < 26; i++) {
+  for (let i = 0; i < 40; i++) {
     const angle = rand() * Math.PI * 2
-    const r = 13 + rand() * 16
-    const s = 0.2 + rand() * rand() * 0.9
+    const r = 63 + rand() * 14
+    const s = 0.25 + rand() * rand() * 1.1
     q.setFromAxisAngle(new Vector3(rand(), rand(), rand()).normalize(), rand() * Math.PI)
     rocks.push(new Matrix4().compose(new Vector3(Math.cos(angle) * r, s * 0.25, Math.sin(angle) * r), q, new Vector3(s * 1.3, s * 0.7, s)))
   }
@@ -263,38 +340,49 @@ function instanced(geometry: BufferGeometry, material: MeshStandardMaterial, mat
     const k = 1 - variance + rand() * variance * 2
     mesh.setColorAt(i, color.setRGB(k, k, k * (0.9 + rand() * 0.2)))
   })
+  mesh.computeBoundingSphere()
+  mesh.matrixAutoUpdate = false
   return mesh
 }
 
-/** Sky, ground, scenery and lights. Returns the scene plus a per-frame update. */
-export function createWorld(renderer: WebGLRenderer, density: { texture: DataTexture; rect: { value: Vector2 } }) {
+/** Sky, ground, scenery and lights. Returns the scene plus a way to fade between day and night. */
+export function createWorld(renderer: WebGLRenderer, grassUniforms: GroundUniforms, edgeScale: number) {
   const scene = new Scene()
-  scene.fog = new Fog(FOG_COLOR, FOG_NEAR, FOG_FAR)
+  const fog = new Fog(FOG_COLOR.clone(), FOG_NEAR, FOG_FAR)
+  scene.fog = fog
 
-  const sky = createSky()
+  const daySky = bakeDaySky(renderer)
+  const sky = createSky(daySky)
   scene.add(sky)
 
-  // Bake the sky into an environment map for image-based lighting and the clipper's chrome.
-  const skyScene = new Scene()
-  skyScene.add(createSky())
+  // Image-based lighting for the standard materials, from the same sky.
   const pmrem = new PMREMGenerator(renderer)
-  const environment = pmrem.fromScene(skyScene, 0.02, 0.1, 1000).texture
+  scene.environment = pmrem.fromCubemap(daySky).texture
   pmrem.dispose()
-  scene.environment = environment
-  scene.environmentIntensity = 0.55
 
   const sun = new DirectionalLight(SUN_COLOR, SUN_INTENSITY * Math.PI * 0.75)
   sun.position.copy(SUN_DIR).multiplyScalar(50)
   scene.add(sun)
 
-  scene.add(createGround(density))
+  scene.add(createGround(grassUniforms, edgeScale))
   for (const mesh of createScenery()) scene.add(mesh)
 
-  const skyTime = sky.material.uniforms.uTime
+  const moon = new Color(0.45, 0.55, 0.9)
+  const skyUniforms = sky.material.uniforms
+  const setDay = (day: number) => {
+    setDaylight(day)
+    fog.color.copy(FOG_COLOR)
+    FOG_COLOR.getRGB(skyUniforms.uFogColor.value, SRGBColorSpace)
+    skyUniforms.uDaylight.value = day
+    sun.color.lerpColors(moon, SUN_COLOR, day)
+    sun.intensity = SUN_INTENSITY * Math.PI * 0.75 * (0.08 + 0.92 * day)
+    scene.environmentIntensity = 0.04 + 0.51 * day
+  }
+  setDay(1)
+
   return {
     scene,
-    update(time: number) {
-      skyTime.value = time
-    },
+    /** 1 is full day, 0 is night. */
+    setDaylight: setDay,
   }
 }
