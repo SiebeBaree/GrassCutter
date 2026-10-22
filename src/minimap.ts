@@ -1,17 +1,21 @@
-import { MAP_HALF } from './field'
+import { MAP_HALF, type Vec2 } from './field'
 import { DENSITY_CELLS } from './grass'
+import { FARMER } from './layout'
+import { ROBOT_COLORS } from './robots'
 import type { PlayerState } from './save'
 
-const SIZE = 168
+const SIZE = 176
 /** Metres from the centre to the edge of the map circle. */
-const RANGE = 62
+const RANGE = 134
 const REDRAW_SECONDS = 0.25
-/** Below this many standing blades, each one gets a bright marker so the last few are easy to find. */
-const MARK_BELOW = 300
+/** Each map pixel covers 2×2 density texels. */
+const MINI = DENSITY_CELLS / 2
+/** Below this many standing blades, each patch gets a bright marker so the last few are easy to find. */
+const MARK_BELOW = 400
 
 /**
- * Top-down map of the meadow in the corner: standing grass, cut ground and an arrow for you.
- * North is up. Redraws a few times a second from the grass density counts.
+ * Top-down map of the meadow in the corner: standing grass, cut ground, sunflowers, robots, the stall
+ * and an arrow for you. North is up. Keeps its own image up to date blade by blade through cellChanged().
  */
 export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncutPerCell: Uint8Array) {
   const canvas = document.createElement('canvas')
@@ -23,42 +27,75 @@ export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncu
   const ctx = canvas.getContext('2d')
 
   const cells = document.createElement('canvas')
-  cells.width = DENSITY_CELLS
-  cells.height = DENSITY_CELLS
+  cells.width = MINI
+  cells.height = MINI
   const cellsCtx = cells.getContext('2d')
-  const image = cellsCtx?.createImageData(DENSITY_CELLS, DENSITY_CELLS)
+  const image = cellsCtx?.createImageData(MINI, MINI)
+  const standing = new Uint16Array(MINI * MINI)
+  const total = new Uint16Array(MINI * MINI)
+  let dirty = true
   let drawnAt = -Infinity
 
+  const paint = (m: number) => {
+    if (!image) return
+    const px = image.data
+    const o = m * 4
+    if (total[m] === 0) {
+      px[o + 3] = 0
+    } else if (standing[m] > 0) {
+      const k = 0.75 + (0.25 * standing[m]) / total[m]
+      px[o] = 52 * k
+      px[o + 1] = 112 * k
+      px[o + 2] = 30 * k
+      px[o + 3] = 255
+    } else {
+      px[o] = 205
+      px[o + 1] = 206
+      px[o + 2] = 140
+      px[o + 3] = 235
+    }
+  }
+
+  const miniOf = (d: number) => (Math.floor(d / DENSITY_CELLS) >> 1) * MINI + ((d % DENSITY_CELLS) >> 1)
+  for (let d = 0; d < bladesPerCell.length; d++) {
+    const m = miniOf(d)
+    total[m] += bladesPerCell[d]
+    standing[m] += uncutPerCell[d]
+  }
+  for (let m = 0; m < standing.length; m++) paint(m)
+
+  /** Maps metres to canvas pixels. */
+  const scale = (SIZE * dpr) / (RANGE * 2)
+  const c = (SIZE * dpr) / 2
+  const dot = (at: Vec2, radius: number, fill: string) => {
+    if (!ctx) return
+    ctx.beginPath()
+    ctx.arc(c + at.x * scale, c + at.z * scale, radius * dpr, 0, Math.PI * 2)
+    ctx.fillStyle = fill
+    ctx.fill()
+    ctx.stroke()
+  }
+
   return {
-    setVisible(visible: boolean) {
-      canvas.hidden = !visible
+    /** A density texel's standing count changed. */
+    cellChanged(d: number) {
+      const m = miniOf(d)
+      const row = Math.floor(d / DENSITY_CELLS) & ~1
+      const col = (d % DENSITY_CELLS) & ~1
+      const at = row * DENSITY_CELLS + col
+      standing[m] = uncutPerCell[at] + uncutPerCell[at + 1] + uncutPerCell[at + DENSITY_CELLS] + uncutPerCell[at + DENSITY_CELLS + 1]
+      paint(m)
+      dirty = true
     },
-    update(time: number, player: PlayerState, remaining: number) {
+    /** Redraws a few times a second. `flowers` is only asked for on a redraw. */
+    update(time: number, player: PlayerState, remaining: number, flowers: () => readonly Vec2[], robots: readonly Vec2[]) {
       if (!ctx || !cellsCtx || !image || canvas.hidden || time - drawnAt < REDRAW_SECONDS) return
       drawnAt = time
-
-      const px = image.data
-      for (let d = 0; d < bladesPerCell.length; d++) {
-        const o = d * 4
-        if (bladesPerCell[d] === 0) {
-          px[o + 3] = 0
-        } else if (uncutPerCell[d] > 0) {
-          const k = 0.75 + (0.25 * uncutPerCell[d]) / bladesPerCell[d]
-          px[o] = 52 * k
-          px[o + 1] = 112 * k
-          px[o + 2] = 30 * k
-          px[o + 3] = 255
-        } else {
-          px[o] = 205
-          px[o + 1] = 206
-          px[o + 2] = 140
-          px[o + 3] = 235
-        }
+      if (dirty) {
+        cellsCtx.putImageData(image, 0, 0)
+        dirty = false
       }
-      cellsCtx.putImageData(image, 0, 0)
 
-      const scale = (SIZE * dpr) / (RANGE * 2)
-      const c = (SIZE * dpr) / 2
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.save()
@@ -70,24 +107,23 @@ export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncu
       ctx.imageSmoothingEnabled = true
       ctx.drawImage(cells, c - MAP_HALF * scale, c - MAP_HALF * scale, MAP_HALF * 2 * scale, MAP_HALF * 2 * scale)
 
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)'
+      ctx.lineWidth = 1.2 * dpr
       if (remaining > 0 && remaining < MARK_BELOW) {
-        ctx.fillStyle = '#ffd84d'
-        const cellPx = ((MAP_HALF * 2) / DENSITY_CELLS) * scale
-        for (let d = 0; d < uncutPerCell.length; d++) {
-          if (uncutPerCell[d] === 0) continue
-          const x = c - MAP_HALF * scale + ((d % DENSITY_CELLS) + 0.5) * cellPx
-          const y = c - MAP_HALF * scale + (Math.floor(d / DENSITY_CELLS) + 0.5) * cellPx
-          ctx.beginPath()
-          ctx.arc(x, y, 2.5 * dpr, 0, Math.PI * 2)
-          ctx.fill()
+        const cellMetres = (MAP_HALF * 2) / MINI
+        for (let m = 0; m < standing.length; m++) {
+          if (standing[m] === 0) continue
+          dot({ x: ((m % MINI) + 0.5) * cellMetres - MAP_HALF, z: (Math.floor(m / MINI) + 0.5) * cellMetres - MAP_HALF }, 2.4, '#ffffff')
         }
       }
+      for (const f of flowers()) dot(f, 2.6, '#ffd23a')
+      dot(FARMER, 3.2, '#c8352b')
+      robots.forEach((r, k) => dot(r, 3, ROBOT_COLORS[k]))
 
       // You: an arrow pointing where you look.
       ctx.translate(c + player.x * scale, c + player.z * scale)
       ctx.rotate(-player.yaw)
       ctx.fillStyle = '#ffffff'
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)'
       ctx.lineWidth = 1.5 * dpr
       ctx.beginPath()
       ctx.moveTo(0, -7 * dpr)

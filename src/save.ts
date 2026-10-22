@@ -1,33 +1,41 @@
 import { z } from 'zod'
-import { BLADE_COUNT } from './field'
-import { SIGN } from './sign'
-import { TOOLS } from './tools'
+import type { RobotSave } from './economy'
+import { BLADE_COUNT, type Growth } from './field'
+import { SPAWN } from './layout'
+import { MAX_ROBOTS, type Tier } from './tools'
+import { browserFingerprint, deriveKey, installSalt, seal, unseal } from './vault'
 
-// Progress lives in localStorage as JSON. Cut blades are a bitset (25 KB for 200,000 blades), so a save
-// is small enough to write every few seconds while you play.
+// Progress lives in localStorage, sealed by vault.ts. Inside is a small JSON header (coins, tools, robots,
+// position) followed by one bit per blade. The bits run in grid order rather than blade order, so a
+// mown stripe is a run of zeros and the whole thing compresses well.
 
 /** Bump when field generation changes: old bitsets would point at different blades. */
-const SAVE_VERSION = 2
-export const SAVE_KEY = 'grass-cutter/save'
-const CUT_BYTES = Math.ceil(BLADE_COUNT / 8)
-
-/** First-time spawn: in front of the welcome sign, looking at it and the meadow behind it. */
-export const SPAWN = { x: 0, z: SIGN.z + 2.9, yaw: 0, pitch: -0.1 }
+const SAVE_VERSION = 3
+const SAVE_KEY = 'grass-cutter/v3'
+/**
+ * A save that wouldn't open is set aside here instead of being overwritten. Changing how the browser
+ * reports itself (a desktop-site toggle, a dev tools device) changes the key, and switching back
+ * should bring the old save back.
+ */
+const ASIDE_KEY = 'grass-cutter/v3-unopened'
+/** Saves from earlier versions. They don't carry over, so they're deleted on load. */
+const OLD_KEYS = ['grass-cutter/save']
+const MAX_SUNFLOWERS = 40
 
 const PlayerSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number(), pitch: z.number() })
+const TierSchema = z.literal([0, 1, 2, 3, 4, 5])
 
-const SaveSchema = z.object({
+const HeaderSchema = z.object({
   version: z.literal(SAVE_VERSION),
-  cut: z.base64(),
-  // A broken position, timer or tool shouldn't cost anyone their progress.
+  coins: z.number().int().nonnegative(),
+  tier: TierSchema,
+  robots: z.array(z.object({ tier: TierSchema, x: z.number(), z: z.number(), yaw: z.number() })).max(MAX_ROBOTS),
+  // A broken position, timer or flower shouldn't cost anyone their progress.
+  earned: z.number().nonnegative().catch(0),
+  tool: TierSchema.catch(0),
+  sunflowers: z.array(z.object({ x: z.number(), z: z.number() })).max(MAX_SUNFLOWERS).catch([]),
   player: PlayerSchema.catch(SPAWN),
   playSeconds: z.number().nonnegative().catch(0),
-  tool: z
-    .number()
-    .int()
-    .min(0)
-    .max(TOOLS.length - 1)
-    .catch(0),
   /** When the last blade fell, in ms since the epoch. */
   finishedAt: z.number().nullable().catch(null),
 })
@@ -35,75 +43,117 @@ const SaveSchema = z.object({
 export type PlayerState = z.infer<typeof PlayerSchema>
 
 export type Save = {
-  /** 1 for every cut blade. */
-  cut: Uint8Array
+  /** 255 for every standing blade, 0 for every cut one. */
+  growth: Growth
+  coins: number
+  /** Every bCoin ever made, spent or not. */
+  earned: number
+  tier: Tier
+  /** The tool in hand. Never above `tier`. */
+  tool: Tier
+  robots: RobotSave[]
+  sunflowers: { x: number; z: number }[]
   player: PlayerState
   playSeconds: number
-  /** Index into TOOLS of the tool in hand. */
-  tool: number
   finishedAt: number | null
 }
 
-function encodeBits(cut: Uint8Array) {
-  const bits = new Uint8Array(CUT_BYTES)
-  for (let i = 0; i < BLADE_COUNT; i++) if (cut[i]) bits[i >> 3] |= 1 << (i & 7)
-  // In slices: spreading 25 KB of arguments at once can overflow the call stack.
-  let binary = ''
-  for (let i = 0; i < bits.length; i += 8192) binary += String.fromCharCode(...bits.subarray(i, i + 8192))
-  return btoa(binary)
+const finite = (...values: number[]) => values.every(Number.isFinite)
+
+/** Header and bits as bytes. `cellBlade` from the field sets the order of the bits. */
+export function encodeSave(save: Save, cellBlade: Int32Array) {
+  const { x, z: pz, yaw, pitch } = save.player
+  const header = new TextEncoder().encode(
+    JSON.stringify({
+      version: SAVE_VERSION,
+      coins: Math.floor(save.coins),
+      tier: save.tier,
+      robots: save.robots.map((r) => (finite(r.x, r.z, r.yaw) ? r : { ...r, ...SPAWN })),
+      earned: Math.floor(save.earned),
+      tool: save.tool <= save.tier ? save.tool : save.tier,
+      sunflowers: save.sunflowers.slice(0, MAX_SUNFLOWERS),
+      player: finite(x, pz, yaw, pitch) ? save.player : SPAWN,
+      playSeconds: Number.isFinite(save.playSeconds) ? save.playSeconds : 0,
+      finishedAt: save.finishedAt,
+    } satisfies z.input<typeof HeaderSchema>),
+  )
+  const bytes = new Uint8Array(4 + header.length + BLADE_COUNT / 8)
+  new DataView(bytes.buffer).setUint32(0, header.length, true)
+  bytes.set(header, 4)
+  const bits = bytes.subarray(4 + header.length)
+  let k = 0
+  for (const i of cellBlade) {
+    if (i < 0) continue
+    if (save.growth[i]) bits[k >> 3] |= 1 << (k & 7)
+    k++
+  }
+  return bytes
 }
 
-/** Null unless the string holds exactly one bit per blade. */
-function decodeBits(base64: string) {
-  const bytes = atob(base64)
-  if (bytes.length !== CUT_BYTES) return null
-  const cut = new Uint8Array(BLADE_COUNT)
-  for (let i = 0; i < BLADE_COUNT; i++) cut[i] = (bytes.charCodeAt(i >> 3) >> (i & 7)) & 1
-  return cut
-}
-
-export function encodeSave(save: Save): string {
-  const finite = Object.values(save.player).every(Number.isFinite)
-  return JSON.stringify({
-    version: SAVE_VERSION,
-    cut: encodeBits(save.cut),
-    player: finite ? save.player : SPAWN,
-    playSeconds: Number.isFinite(save.playSeconds) ? save.playSeconds : 0,
-    tool: save.tool,
-    finishedAt: save.finishedAt,
-  } satisfies z.input<typeof SaveSchema>)
-}
-
-/** Returns null for anything that isn't a valid save for this version of the field. */
-export function decodeSave(raw: string): Save | null {
+/** Null unless the bytes hold a save for this version of the field. */
+export function decodeSave(bytes: Uint8Array, cellBlade: Int32Array): Save | null {
+  if (bytes.length < 4) return null
+  const headerLength = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true)
+  if (bytes.length !== 4 + headerLength + BLADE_COUNT / 8) return null
   let json: unknown
   try {
-    json = JSON.parse(raw)
+    json = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headerLength)))
   } catch {
     return null
   }
-  const parsed = SaveSchema.safeParse(json)
+  const parsed = HeaderSchema.safeParse(json)
   if (!parsed.success) return null
 
-  const cut = decodeBits(parsed.data.cut)
-  if (!cut) return null
-  const { player, playSeconds, tool, finishedAt } = parsed.data
-  return { cut, player, playSeconds, tool, finishedAt }
+  const bits = bytes.subarray(4 + headerLength)
+  const growth = new Uint8Array(BLADE_COUNT)
+  let k = 0
+  for (const i of cellBlade) {
+    if (i < 0) continue
+    growth[i] = (bits[k >> 3] >> (k & 7)) & 1 ? 255 : 0
+    k++
+  }
+  const { version: _, tool, tier, ...rest } = parsed.data
+  return { ...rest, growth, tier, tool: tool <= tier ? tool : tier }
 }
 
-export function loadSave(): Save | null {
+let key: Promise<CryptoKey> | null = null
+const vaultKey = () => (key ??= deriveKey(installSalt(), browserFingerprint()))
+
+/**
+ * Your save, or null if there's none that opens here (edited by hand, or from another browser). Of the
+ * current save and one set aside earlier, the one with more progress wins.
+ */
+export async function loadSave(cellBlade: Int32Array) {
   try {
-    const raw = localStorage.getItem(SAVE_KEY)
-    return raw === null ? null : decodeSave(raw)
+    for (const old of OLD_KEYS) localStorage.removeItem(old)
+    const key = await vaultKey()
+    const open = async (slot: string) => {
+      const text = localStorage.getItem(slot)
+      const bytes = text === null ? null : await unseal(key, text)
+      return { text, save: bytes && decodeSave(bytes, cellBlade) }
+    }
+    const current = await open(SAVE_KEY)
+    const aside = await open(ASIDE_KEY)
+    if (current.text !== null && !current.save && !aside.save) localStorage.setItem(ASIDE_KEY, current.text)
+    const saves = [current.save, aside.save].filter((s) => s !== null)
+    return saves.sort((a, b) => b.earned - a.earned)[0] ?? null
   } catch {
     return null
   }
 }
 
-/** Returns false if the browser refused to store it (private mode, quota, disabled storage). */
-export function writeSave(save: Save): boolean {
+let writes = 0
+
+/**
+ * Seals and stores a snapshot of `save`, taken before this returns. Resolves false if the browser
+ * refused to store it (private mode, quota, disabled storage). A write overtaken by a newer one is skipped.
+ */
+export async function writeSave(save: Save, cellBlade: Int32Array, stillWanted: () => boolean) {
+  const bytes = encodeSave(save, cellBlade)
+  const id = ++writes
   try {
-    localStorage.setItem(SAVE_KEY, encodeSave(save))
+    const text = await seal(await vaultKey(), bytes)
+    if (id === writes && stillWanted()) localStorage.setItem(SAVE_KEY, text)
     return true
   } catch {
     return false
@@ -111,8 +161,10 @@ export function writeSave(save: Save): boolean {
 }
 
 export function clearSave() {
+  writes++
   try {
     localStorage.removeItem(SAVE_KEY)
+    localStorage.removeItem(ASIDE_KEY)
   } catch {
     // Nothing stored, nothing to clear.
   }

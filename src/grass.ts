@@ -14,7 +14,6 @@ import {
   UniformsUtils,
   Vector2,
   Vector3,
-  Vector4,
   type Texture,
 } from 'three'
 import {
@@ -24,12 +23,16 @@ import {
   CELLS_PER_CHUNK,
   CHUNK,
   CHUNKS,
+  grownHeight,
   MAP_HALF,
-  PUSH_RADIUS,
-  PUSH_STRENGTH,
+  PARKED,
+  PUSHERS,
+  regrowthCandidate,
+  SPROUT_HEIGHT,
   STUB_HEIGHT,
   WIND_DIR,
   type Field,
+  type Growth,
   type Vec2,
 } from './field'
 import { lightUniforms } from './light'
@@ -47,19 +50,28 @@ export const DENSITY_CELLS = CELLS / 2
 const FULL_CELL = 4
 /** Fastest the density texture re-uploads while you cut. */
 const DENSITY_UPLOAD_SECONDS = 0.1
-const MOWER_PUSH_RADIUS = 1.0
-const MOWER_PUSH_STRENGTH = 0.5
+/** Seconds a sprout takes to reach full height. Growth steps a few times a second, not every frame. */
+const GROW_SECONDS = 60
+const GROW_TICK = 0.25
+/**
+ * Regrowth tries per second. Each picks a random blade and one of its neighbours, and sprouts the
+ * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 17 minutes
+ * on average; the edge of a mown patch creeps back slower. Cleared ground with no grass next to it never does.
+ */
+const REGROWTH_TRIES = 1000
 /** Stubs fade out between these distances, inside the nearest detail level. Further out the ground paints the cut look. */
 const STUB_FADE = [5, 8] as const
 
 /**
  * Detail levels by distance from a chunk's nearest edge. Far chunks draw a prefix of their shuffled
- * blades, widened to cover the same ground.
+ * blades, widened to cover the same ground. Thin far-off blades are the most expensive pixels in the
+ * game, so past 70 m only one blade in twenty is drawn, four and a half times as wide.
  */
 const LODS = [
   { segments: BLADE_SEGMENTS, upTo: 9, share: 1, widen: 1 },
-  { segments: 3, upTo: 30, share: 1, widen: 1 },
-  { segments: 2, upTo: Infinity, share: 0.45, widen: 1.5 },
+  { segments: 3, upTo: 30, share: 0.75, widen: 1.15 },
+  { segments: 2, upTo: 70, share: 0.3, widen: 1.8 },
+  { segments: 1, upTo: Infinity, share: 0.05, widen: 4.5 },
 ] as const
 
 const glslFloat = (v: number) => (Number.isInteger(v) ? `${v}.0` : `${v}`)
@@ -67,14 +79,12 @@ const glslFloat = (v: number) => (Number.isInteger(v) ? `${v}.0` : `${v}`)
 /** Shared vertex helpers. bladeLean() and bladeTaper() mirror field.ts. */
 const bladeCommon = /* glsl */ `
   #define STUB ${glslFloat(STUB_HEIGHT)}
-  #define PUSH_RADIUS ${glslFloat(PUSH_RADIUS)}
-  #define PUSH_STRENGTH ${glslFloat(PUSH_STRENGTH)}
-  #define MOWER_PUSH_RADIUS ${glslFloat(MOWER_PUSH_RADIUS)}
-  #define MOWER_PUSH_STRENGTH ${glslFloat(MOWER_PUSH_STRENGTH)}
+  #define SPROUT ${glslFloat(SPROUT_HEIGHT)}
+  #define PUSHERS ${PUSHERS}
   const vec2 WIND_DIR = vec2(${glslFloat(WIND_DIR.x)}, ${glslFloat(WIND_DIR.z)});
 
   uniform float uTime;
-  uniform vec4 uPushers; // xy: player, zw: lawn mower (parked far away when not in use)
+  uniform vec4 uPushers[PUSHERS]; // x, z, radius, strength: you, the mower deck and the robots
   uniform sampler2D uDensity;
   uniform vec2 uDensityRect;
   uniform sampler2D uNoise;
@@ -107,8 +117,7 @@ const bladeCommon = /* glsl */ `
     float phase = uTime * 1.7 + base.x * 0.37 + base.y * 0.23;
     float sway = sin(phase) * 0.6 + sin(phase * 2.3 + 1.7) * 0.25;
     vec2 lean = WIND_DIR * gust * (0.07 + 0.06 * sway);
-    lean += pushAway(base, uPushers.xy, PUSH_RADIUS, PUSH_STRENGTH);
-    lean += pushAway(base, uPushers.zw, MOWER_PUSH_RADIUS, MOWER_PUSH_STRENGTH);
+    for (int p = 0; p < PUSHERS; p++) lean += pushAway(base, uPushers[p].xy, uPushers[p].z, uPushers[p].w);
     return lean;
   }
 
@@ -186,15 +195,16 @@ const bladeFragment = /* glsl */ `
 
 const standingVertex = /* glsl */ `
   ${bladeCommon}
-  attribute float aCut; // 0 standing, 1 cut down to a stub
+  attribute float aGrowth; // 0 cut down to a stub, 1 full height, between: growing back
   uniform float uWiden;
   uniform vec3 uHighlight; // x, z, radius: blades rooted inside glow
 
   #include <fog_pars_vertex>
 
   void main() {
-    float h = aShape.x;
-    float standing = 1.0 - aCut;
+    float standing = step(0.001, aGrowth);
+    // A sprout is the whole blade, shorter. Mirrors grownHeight() in field.ts.
+    float h = mix(aShape.x, mix(SPROUT, aShape.x, aGrowth), standing);
     // A cut blade collapses every row above the stub onto the cut line: a flat-topped stub.
     float t = min(position.y, mix(STUB / h, 1.0, standing));
     vec2 base = aBase.xy;
@@ -309,23 +319,24 @@ function createBladeGeometry(segments: number) {
 }
 
 type Chunk = {
+  k: number
   start: number
   minX: number
   minZ: number
-  standing: number
-  cutAttr: InstancedBufferAttribute
+  growthAttr: InstancedBufferAttribute
   /** One mesh per detail level. At most one is visible. */
   lods: Mesh[]
+  /** Blades changed since the GPU last got this chunk's growth bytes. */
   dirtyFrom: number
   dirtyTo: number
 }
 
 /**
- * Standing blades in chunks with distance-based detail, falling and fallen clippings, and the density
- * texture that lets the soil brighten and show mowing stripes as the meadow thins out.
- * `cut` holds 1 for every cut blade; this module owns writes to it.
+ * Standing blades in chunks with distance-based detail, regrowth, falling and fallen clippings, and the
+ * density texture that lets the soil brighten and show mowing stripes as the meadow thins out.
+ * This module owns writes to `growth`. `onDensity` hears about every density texel whose count changes.
  */
-export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
+export function createGrass(field: Field, growth: Growth, noise: Texture, onDensity: (d: number) => void) {
   // Density texture. R: uncut share of the texel. G, B: direction the mower last crossed it, 0.5 for never.
   const bladesPerCell = new Uint8Array(DENSITY_CELLS * DENSITY_CELLS)
   const uncutPerCell = new Uint8Array(DENSITY_CELLS * DENSITY_CELLS)
@@ -333,25 +344,57 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
     const c = field.cellOf[i]
     return (Math.floor(c / CELLS) >> 1) * DENSITY_CELLS + ((c % CELLS) >> 1)
   }
+  let standingTotal = 0
   for (let i = 0; i < BLADE_COUNT; i++) {
     const d = densityCellOf(i)
     bladesPerCell[d]++
-    if (!cut[i]) uncutPerCell[d]++
+    if (growth[i]) {
+      uncutPerCell[d]++
+      standingTotal++
+    }
   }
   const densityData = new Uint8Array(DENSITY_CELLS * DENSITY_CELLS * 4)
   for (let d = 0; d < uncutPerCell.length; d++) {
-    densityData.set([Math.round(Math.min(1, uncutPerCell[d] / FULL_CELL) * 255), 128, 128, 255], d * 4)
+    const o = d * 4
+    densityData[o] = Math.round(Math.min(1, uncutPerCell[d] / FULL_CELL) * 255)
+    densityData[o + 1] = 128
+    densityData[o + 2] = 128
+    densityData[o + 3] = 255
   }
   const density = new DataTexture(densityData, DENSITY_CELLS, DENSITY_CELLS)
   density.magFilter = LinearFilter
   density.minFilter = LinearFilter
   density.needsUpdate = true
-  let densityDirty = false
+  // Rows of the texture written since the last upload, and the span of each, so uploads send only those.
+  const rowFrom = new Int32Array(DENSITY_CELLS).fill(DENSITY_CELLS)
+  const rowTo = new Int32Array(DENSITY_CELLS).fill(-1)
+  const dirtyRows: number[] = []
   let densityUploadedAt = -Infinity
 
+  const setDensity = (d: number) => {
+    densityData[d * 4] = Math.round(Math.min(1, uncutPerCell[d] / FULL_CELL) * 255)
+    const row = Math.floor(d / DENSITY_CELLS)
+    const col = d % DENSITY_CELLS
+    if (rowTo[row] < 0) dirtyRows.push(row)
+    rowFrom[row] = Math.min(rowFrom[row], col)
+    rowTo[row] = Math.max(rowTo[row], col)
+    onDensity(d)
+  }
+
+  // Standing blades per chunk, for the robots looking for work.
+  const chunkStanding = new Int32Array(CHUNKS * CHUNKS)
+  // Sprouts still growing, and a flag per blade so none is listed twice.
+  const growing: number[] = []
+  const isGrowing = new Uint8Array(BLADE_COUNT)
+  let growCarry = 0
+  let grownAt = 0
+  let regrowthBudget = 0
+
+  const pushers = new Float32Array(PUSHERS * 4)
+  for (let p = 0; p < PUSHERS * 4; p += 4) pushers.set([PARKED, PARKED, 1, 0], p)
   const shared = {
     uTime: { value: 0 },
-    uPushers: { value: new Vector4(0, 0, 1e4, 1e4) },
+    uPushers: { value: pushers },
     uDensity: { value: density },
     uDensityRect: { value: new Vector2(MAP_HALF, 1 / (MAP_HALF * 2)) },
     uNoise: { value: noise },
@@ -374,7 +417,7 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
   // Standing blades, one set of meshes per chunk. Empty chunks get none.
   const chunks: Chunk[] = []
   const chunkAt: (Chunk | undefined)[] = []
-  const standing: Mesh[] = []
+  const meshes: Mesh[] = []
   for (let k = 0; k < CHUNKS * CHUNKS; k++) {
     const start = field.chunkStart[k]
     const n = field.chunkStart[k + 1] - start
@@ -382,18 +425,22 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
 
     const base = new Float32Array(n * 3)
     const shape = new Float32Array(n * 4)
-    let standingCount = 0
     for (let j = 0; j < n; j++) {
       const i = start + j
-      base.set([field.x[i], field.z[i], field.yaw[i]], j * 3)
-      shape.set([field.height[i], field.width[i], field.bend[i], field.tint[i]], j * 4)
-      if (!cut[i]) standingCount++
+      base[j * 3] = field.x[i]
+      base[j * 3 + 1] = field.z[i]
+      base[j * 3 + 2] = field.yaw[i]
+      shape[j * 4] = field.height[i]
+      shape[j * 4 + 1] = field.width[i]
+      shape[j * 4 + 2] = field.bend[i]
+      shape[j * 4 + 3] = field.tint[i]
+      if (growth[i]) chunkStanding[k]++
     }
     const baseAttr = new InstancedBufferAttribute(base, 3)
     const shapeAttr = new InstancedBufferAttribute(shape, 4)
-    // A view into `cut`: writes there land on the GPU at the next flush.
-    const cutAttr = new InstancedBufferAttribute(cut.subarray(start, start + n), 1)
-    cutAttr.setUsage(DynamicDrawUsage)
+    // A view into `growth`, read as 0..1: writes there land on the GPU at the next flush.
+    const growthAttr = new InstancedBufferAttribute(growth.subarray(start, start + n), 1, true)
+    growthAttr.setUsage(DynamicDrawUsage)
 
     const minX = (k % CHUNKS) * CHUNK - MAP_HALF
     const minZ = Math.floor(k / CHUNKS) * CHUNK - MAP_HALF
@@ -405,7 +452,7 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
       geometry.setAttribute('position', lodGeometries[l].getAttribute('position'))
       geometry.setAttribute('aBase', baseAttr)
       geometry.setAttribute('aShape', shapeAttr)
-      geometry.setAttribute('aCut', cutAttr)
+      geometry.setAttribute('aGrowth', growthAttr)
       geometry.instanceCount = Math.ceil(n * lod.share)
       geometry.boundingSphere = bounds
       const mesh = new Mesh(geometry, lodMaterials[l])
@@ -413,10 +460,15 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
       mesh.visible = false
       return mesh
     })
-    const chunk: Chunk = { start, minX, minZ, standing: standingCount, cutAttr, lods, dirtyFrom: Infinity, dirtyTo: -1 }
+    const chunk: Chunk = { k, start, minX, minZ, growthAttr, lods, dirtyFrom: Infinity, dirtyTo: -1 }
+    // A chunk out of view uploads nothing, so its changes pile up as one range until it's drawn again.
+    growthAttr.onUpload(() => {
+      chunk.dirtyFrom = Infinity
+      chunk.dirtyTo = -1
+    })
     chunks.push(chunk)
     chunkAt[k] = chunk
-    standing.push(...lods)
+    meshes.push(...lods)
   }
   const chunkOf = (i: number) => {
     const c = field.cellOf[i]
@@ -424,6 +476,47 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
     const chunk = chunkAt[k]
     if (!chunk) throw new Error(`Blade ${i} has no chunk`)
     return chunk
+  }
+  const touch = (i: number) => {
+    const chunk = chunkOf(i)
+    const local = i - chunk.start
+    chunk.dirtyFrom = Math.min(chunk.dirtyFrom, local)
+    chunk.dirtyTo = Math.max(chunk.dirtyTo, local)
+    return chunk
+  }
+
+  /** Brings cut blade i back as a sprout. */
+  const sprout = (i: number) => {
+    growth[i] = 1
+    standingTotal++
+    chunkStanding[touch(i).k]++
+    const d = densityCellOf(i)
+    uncutPerCell[d]++
+    setDensity(d)
+    if (!isGrowing[i]) {
+      isGrowing[i] = 1
+      growing.push(i)
+    }
+  }
+
+  /** Raises every sprout a step. Ones that were cut meanwhile, or reached full height, leave the list. */
+  const grow = (seconds: number) => {
+    growCarry += (255 * seconds) / GROW_SECONDS
+    const step = Math.floor(growCarry)
+    growCarry -= step
+    if (step === 0) return
+    let kept = 0
+    for (const i of growing) {
+      if (growth[i] === 0) {
+        isGrowing[i] = 0
+        continue
+      }
+      growth[i] = Math.min(255, growth[i] + step)
+      touch(i)
+      if (growth[i] === 255) isGrowing[i] = 0
+      else growing[kept++] = i
+    }
+    growing.length = kept
   }
 
   // Clippings: a ring of falling and fallen blades.
@@ -458,38 +551,55 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
   let lastDrop = -Infinity
 
   return {
-    standing,
+    /** Every chunk's detail levels. Add them all to the scene; update() shows the right one. */
+    meshes,
     clippings,
     /** Uniforms the ground shader shares: density texture, its mapping, noise and time. */
     uniforms: shared,
     /** Blades per density texel, row by row from -MAP_HALF, and how many still stand. Read by the minimap. */
     bladesPerCell,
     uncutPerCell,
+    /** Standing blades in each chunk, row by row along x. */
+    chunkStanding,
+    /** x, z, radius, strength for each of the PUSHERS. Write before update(). */
+    pushers,
+    /** Blades still standing, sprouts included. */
+    get standing() {
+      return standingTotal
+    },
     /** Call once per frame before rendering. */
-    update(time: number, camera: Vec2, player: Vec2, mower: Vec2 | null) {
+    update(time: number, camera: Vec2) {
       shared.uTime.value = time
-      shared.uPushers.value.set(player.x, player.z, mower?.x ?? 1e4, mower?.z ?? 1e4)
+      if (time - grownAt >= GROW_TICK) {
+        grow(Math.min(1, time - grownAt))
+        grownAt = time
+      }
 
       for (const chunk of chunks) {
         const dx = Math.max(chunk.minX - camera.x, 0, camera.x - chunk.minX - CHUNK)
         const dz = Math.max(chunk.minZ - camera.z, 0, camera.z - chunk.minZ - CHUNK)
         const d = Math.hypot(dx, dz)
-        let lod = d < LODS[0].upTo ? 0 : d < LODS[1].upTo ? 1 : 2
+        let lod = 0
+        while (d >= LODS[lod].upTo) lod++
         // Far detail levels hide stubs, so a fully cut chunk has nothing to draw there.
-        if (chunk.standing === 0 && lod > 0) lod = -1
+        if (chunkStanding[chunk.k] === 0 && lod > 0) lod = -1
         for (let l = 0; l < chunk.lods.length; l++) chunk.lods[l].visible = l === lod
 
         if (chunk.dirtyTo >= chunk.dirtyFrom) {
-          chunk.cutAttr.addUpdateRange(chunk.dirtyFrom, chunk.dirtyTo - chunk.dirtyFrom + 1)
-          chunk.cutAttr.needsUpdate = true
-          chunk.dirtyFrom = Infinity
-          chunk.dirtyTo = -1
+          chunk.growthAttr.clearUpdateRanges()
+          chunk.growthAttr.addUpdateRange(chunk.dirtyFrom, chunk.dirtyTo - chunk.dirtyFrom + 1)
+          chunk.growthAttr.needsUpdate = true
         }
       }
 
-      if (densityDirty && time - densityUploadedAt > DENSITY_UPLOAD_SECONDS) {
+      if (dirtyRows.length && time - densityUploadedAt > DENSITY_UPLOAD_SECONDS) {
+        for (const row of dirtyRows) {
+          density.addUpdateRange((row * DENSITY_CELLS + rowFrom[row]) * 4, (rowTo[row] - rowFrom[row] + 1) * 4)
+          rowFrom[row] = DENSITY_CELLS
+          rowTo[row] = -1
+        }
+        dirtyRows.length = 0
         density.needsUpdate = true
-        densityDirty = false
         densityUploadedAt = time
       }
 
@@ -508,35 +618,40 @@ export function createGrass(field: Field, cut: Uint8Array, noise: Texture) {
     setHighlight(x: number, z: number, radius: number) {
       highlight.value.set(x, z, radius)
     },
-    /** Cuts blade i down to a stub. Pass the mower's heading to stripe the ground it crossed. */
+    /** Cuts blade i down to a stub. Pass the mower's heading to stripe the ground it crossed. Returns false if it was already cut. */
     cut(i: number, mowHeading?: Vec2) {
-      if (cut[i]) return
-      cut[i] = 1
-      const chunk = chunkOf(i)
-      const local = i - chunk.start
-      chunk.dirtyFrom = Math.min(chunk.dirtyFrom, local)
-      chunk.dirtyTo = Math.max(chunk.dirtyTo, local)
-      chunk.standing--
+      if (growth[i] === 0) return false
+      growth[i] = 0
+      standingTotal--
+      chunkStanding[touch(i).k]--
 
       const d = densityCellOf(i)
       uncutPerCell[d]--
-      densityData[d * 4] = Math.round(Math.min(1, uncutPerCell[d] / FULL_CELL) * 255)
       if (mowHeading) {
         densityData[d * 4 + 1] = Math.round(127.5 + mowHeading.x * 127)
         densityData[d * 4 + 2] = Math.round(127.5 + mowHeading.z * 127)
       }
-      densityDirty = true
+      setDensity(d)
+      return true
+    },
+    /** Lets the meadow grow back for `seconds`: grass creeps into cut ground next to it. */
+    regrow(seconds: number) {
+      regrowthBudget += seconds * REGROWTH_TRIES
+      for (; regrowthBudget >= 1; regrowthBudget--) {
+        const i = regrowthCandidate(field, growth, Math.random)
+        if (i >= 0) sprout(i)
+      }
     },
     /**
-     * Drops the top of blade i as a clipping that tips over from startTime.
-     * Clippings fall along the blade's facing; `backward` tips it the other way.
+     * Drops the top of blade i as a clipping that tips over from startTime. Call before cut(), while
+     * the blade still has its height. Clippings fall along the blade's facing; `backward` tips it the other way.
      */
     dropClipping(i: number, startTime: number, backward: boolean, lean: Vec2) {
       const slot = clipRing.claim()
       // Turning a blade half a circle and flipping its bend gives the same shape, facing the other way.
       const flip = backward ? -1 : 1
       clipBase.setXYZ(slot, field.x[i], field.z[i], field.yaw[i] + (backward ? Math.PI : 0))
-      clipShape.setXYZW(slot, field.height[i], field.width[i], field.bend[i] * flip, field.tint[i])
+      clipShape.setXYZW(slot, grownHeight(field, growth, i), field.width[i], field.bend[i] * flip, field.tint[i])
       // Rest a few millimetres apart so overlapping clippings don't flicker.
       clipFall.setXYZW(slot, startTime, 0.012 + ((i * 7919) % 97) / 97 / 40, lean.x, lean.z)
       lastDrop = startTime

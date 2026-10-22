@@ -7,8 +7,8 @@ import { Color, Vector3 } from 'three'
 export const SUN_DIR = new Vector3(0.55, 0.5, 0.67).normalize()
 export const SUN_INTENSITY = 2.5
 export const SUN_COLOR = new Color(1.0, 0.9, 0.75)
-export const FOG_NEAR = 45
-export const FOG_FAR = 300
+export const FOG_NEAR = 70
+export const FOG_FAR = 460
 
 const DAY = {
   sun: SUN_COLOR.clone().multiplyScalar(SUN_INTENSITY),

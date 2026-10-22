@@ -1,9 +1,6 @@
 import { BoxGeometry, CanvasTexture, Group, Mesh, MeshStandardMaterial, SRGBColorSpace } from 'three'
-import { BLADE_COUNT, meadowEdge, mulberry32 } from './field'
-
-/** Where the sign stands: just outside the south edge of the meadow, facing away from it. */
-export const SIGN = { x: 0, z: Math.ceil(meadowEdge(Math.PI / 2)) + 3.5, halfWidth: 1.3 }
-const TOTAL = BLADE_COUNT.toLocaleString('en-US')
+import { mulberry32 } from './field'
+import { SIGN } from './layout'
 
 const BOARD_W = 2.6
 const BOARD_H = 1.625
@@ -14,12 +11,12 @@ type SignText = { title: string; lines: string[]; footer?: string }
 
 const WELCOME: SignText = {
   title: 'Welcome, gardener',
-  lines: [`Cut all ${TOTAL} blades in this meadow.`, 'You start with a nail clipper.', 'Cut enough and you earn better tools.'],
-  footer: 'WASD walk     Mouse look     Click cut     Shift run     1-4 tools     Esc pause',
+  lines: ['Cut every blade in this meadow.', 'Each one pays a bCoin.', 'Spend them at the farm shop.'],
+  footer: 'WASD walk     Mouse look     Click cut     1-6 tools     E shop     Esc pause',
 }
 
 /** Painted planks: base colour, grain, knots and seams. */
-function drawWood(ctx: CanvasRenderingContext2D, w: number, h: number, planks: number, seed: number) {
+export function drawWood(ctx: CanvasRenderingContext2D, w: number, h: number, planks: number, seed: number) {
   const rand = mulberry32(seed)
   const plankH = h / planks
   for (let p = 0; p < planks; p++) {
@@ -111,7 +108,7 @@ function drawBoard(canvas: HTMLCanvasElement, text: SignText) {
   }
 }
 
-function woodTexture(seed: number, maxAnisotropy: number) {
+export function woodTexture(seed: number, maxAnisotropy: number) {
   const canvas = document.createElement('canvas')
   canvas.width = 256
   canvas.height = 512
@@ -158,7 +155,7 @@ export function createSign(maxAnisotropy: number) {
     showFinished(time: string) {
       drawBoard(canvas, {
         title: 'Job done',
-        lines: [`You cut all ${TOTAL} blades.`, `It took you ${time}.`, 'The meadow thanks you.'],
+        lines: ['You cut every last blade.', `It took you ${time}.`, 'The meadow thanks you.'],
       })
       face.needsUpdate = true
     },

@@ -1,13 +1,18 @@
 import type { PerspectiveCamera } from 'three'
+import { MAP_HALF } from './field'
+import { pushOut } from './layout'
+import { RIDER_EYE } from './rider'
 import type { PlayerState } from './save'
-import { SIGN } from './sign'
+import { MOWER, RIDER } from './tools'
 
 const EYE_HEIGHT = 1.68
 const WALK_SPEED = 2.6
 const RUN_SPEED = 4.8
-/** How far from the meadow's centre you can walk. The trees start just beyond. */
-const WORLD_RADIUS = 64
+/** How far from the meadow's centre you can go. The trees start just beyond. */
+const WORLD_RADIUS = MAP_HALF - 4
 const BODY_RADIUS = 0.35
+const RIDER_RADIUS = 1.0
+const RIDER_SEAT_BACK = 0.22
 const SENSITIVITY = 0.0022
 /** Radians of bob phase per metre walked: roughly one step every 0.7 m. */
 const STEP_RATE = Math.PI / 0.72
@@ -26,33 +31,41 @@ const MOVE_KEYS = {
 type MoveKey = keyof typeof MOVE_KEYS
 const isMoveKey = (code: string): code is MoveKey => code in MOVE_KEYS
 
-/** First-person walker: WASD on a flat field, kept inside the world and out of the sign. */
+/** On foot, behind the push mower (no sprinting past its top speed) or driving the riding mower. */
+export type Gait = 'walk' | 'push' | 'ride'
+
+/**
+ * First-person mover. On foot, WASD walks relative to where you look. On the riding mower, W and S
+ * drive, A and D steer, and the mouse turns it too.
+ */
 export function createPlayer(start: PlayerState) {
   const state: PlayerState = { ...start }
   const held = new Set<string>()
   let vx = 0
   let vz = 0
   let bob = 0
+  let eye = EYE_HEIGHT
+  let steer = 0
+  let gait: Gait = 'walk'
 
-  function collide() {
-    // Stay in the world.
+  const input = () => {
+    let ix = 0
+    let iz = 0
+    for (const code of held) {
+      if (!isMoveKey(code)) continue
+      ix += MOVE_KEYS[code][0]
+      iz += MOVE_KEYS[code][1]
+    }
+    return { ix, iz }
+  }
+
+  function collide(radius: number) {
     const r = Math.hypot(state.x, state.z)
     if (r > WORLD_RADIUS) {
       state.x *= WORLD_RADIUS / r
       state.z *= WORLD_RADIUS / r
     }
-    // Push out of the sign board (a capsule along its width).
-    const cx = Math.max(SIGN.x - SIGN.halfWidth, Math.min(SIGN.x + SIGN.halfWidth, state.x))
-    const dx = state.x - cx
-    const dz = state.z - SIGN.z
-    const d = Math.hypot(dx, dz)
-    const min = BODY_RADIUS + 0.12
-    if (d < min) {
-      const nx = d > 1e-5 ? dx / d : 0
-      const nz = d > 1e-5 ? dz / d : 1
-      state.x = cx + nx * min
-      state.z = SIGN.z + nz * min
-    }
+    pushOut(state, radius)
   }
 
   return {
@@ -63,6 +76,13 @@ export function createPlayer(start: PlayerState) {
     /** Metres per second over the ground. */
     get speed() {
       return Math.hypot(vx, vz)
+    },
+    /** -1 to 1: how hard you're steering the riding mower. */
+    get steer() {
+      return steer
+    },
+    setGait(next: Gait) {
+      gait = next
     },
     keyDown(code: string) {
       held.add(code)
@@ -82,25 +102,30 @@ export function createPlayer(start: PlayerState) {
     },
     /** Moves the player and returns how many steps were taken this frame (for footstep sounds). */
     update(dt: number) {
-      let ix = 0
-      let iz = 0
-      for (const code of held) {
-        if (!isMoveKey(code)) continue
-        ix += MOVE_KEYS[code][0]
-        iz += MOVE_KEYS[code][1]
-      }
-      const len = Math.hypot(ix, iz)
-      const speed = held.has('ShiftLeft') || held.has('ShiftRight') ? RUN_SPEED : WALK_SPEED
-      const sin = Math.sin(state.yaw)
-      const cos = Math.cos(state.yaw)
+      const { ix, iz } = input()
+      const running = held.has('ShiftLeft') || held.has('ShiftRight')
       let tx = 0
       let tz = 0
-      if (len > 0) {
-        // Forward is -z at yaw 0; right is +x.
-        tx = ((ix * cos - iz * sin) / len) * speed
-        tz = ((-ix * sin - iz * cos) / len) * speed
+      if (gait === 'ride') {
+        steer += (Math.sign(ix) - steer) * Math.min(1, dt * 6)
+        state.yaw -= steer * RIDER.turn * dt
+        const ahead = iz > 0 ? RIDER.speed : iz < 0 ? -RIDER.reverse : 0
+        tx = -Math.sin(state.yaw) * ahead
+        tz = -Math.cos(state.yaw) * ahead
+      } else {
+        steer = 0
+        const len = Math.hypot(ix, iz)
+        const speed = gait === 'push' ? (running ? MOWER.speed : WALK_SPEED) : running ? RUN_SPEED : WALK_SPEED
+        if (len > 0) {
+          const sin = Math.sin(state.yaw)
+          const cos = Math.cos(state.yaw)
+          // Forward is -z at yaw 0; right is +x.
+          tx = ((ix * cos - iz * sin) / len) * speed
+          tz = ((-ix * sin - iz * cos) / len) * speed
+        }
       }
-      const follow = 1 - Math.exp(-dt * 11)
+      // A riding mower picks up speed slower than legs do.
+      const follow = 1 - Math.exp(-dt * (gait === 'ride' ? 2.2 : 11))
       vx += (tx - vx) * follow
       vz += (tz - vz) * follow
 
@@ -109,13 +134,21 @@ export function createPlayer(start: PlayerState) {
       const pz = state.z
       state.x += vx * dt
       state.z += vz * dt
-      collide()
-      bob += Math.hypot(state.x - px, state.z - pz) * STEP_RATE
-      return Math.floor(bob / Math.PI) - before
+      collide(gait === 'ride' ? RIDER_RADIUS : BODY_RADIUS)
+      const moved = Math.hypot(state.x - px, state.z - pz)
+      if (gait !== 'ride') bob += moved * STEP_RATE
+      eye += ((gait === 'ride' ? RIDER_EYE : EYE_HEIGHT) - eye) * Math.min(1, dt * 5)
+      return gait === 'ride' ? 0 : Math.floor(bob / Math.PI) - before
     },
     applyTo(camera: PerspectiveCamera) {
-      const moving = Math.min(1, Math.hypot(vx, vz) / WALK_SPEED)
-      camera.position.set(state.x, EYE_HEIGHT + Math.abs(Math.sin(bob)) * 0.035 * moving - 0.015 * moving, state.z)
+      const moving = gait === 'ride' ? 0 : Math.min(1, Math.hypot(vx, vz) / WALK_SPEED)
+      // On the riding mower you sit at the back of the seat, with the steering wheel and hood ahead.
+      const back = gait === 'ride' ? RIDER_SEAT_BACK : 0
+      camera.position.set(
+        state.x + Math.sin(state.yaw) * back,
+        eye + Math.abs(Math.sin(bob)) * 0.035 * moving - 0.015 * moving,
+        state.z + Math.cos(state.yaw) * back,
+      )
       camera.rotation.set(state.pitch, state.yaw, Math.sin(bob) * 0.006 * moving, 'YXZ')
     },
   }

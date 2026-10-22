@@ -1,26 +1,31 @@
 // The meadow: where every blade stands, how it bends and how to find blades near a point or under the crosshair.
-// Saves refer to blades by index, so generation must stay deterministic. Bump SAVE_VERSION in save.ts
+// Saves refer to blades by grid cell, so generation must stay deterministic. Bump SAVE_VERSION in save.ts
 // whenever anything here changes the layout.
 
-export const BLADE_COUNT = 200_000
+export const BLADE_COUNT = 1_000_000
 /** Blades stand on a jittered grid, at most one per cell. */
 export const CELL = 0.2
 /** Half the side of the square map in metres. The meadow and everything you can walk on fit inside. */
-export const MAP_HALF = 66
+export const MAP_HALF = 138
 export const CELLS = Math.round((MAP_HALF * 2) / CELL)
 /** Side of a render chunk in metres. */
 export const CHUNK = 12
 export const CHUNKS = Math.round((MAP_HALF * 2) / CHUNK)
 export const CELLS_PER_CHUNK = Math.round(CHUNK / CELL)
 /** Meadow radius before the edge wobble. Generation scales the edge so exactly BLADE_COUNT blades fit. */
-export const MEADOW_RADIUS = 50.5
+export const MEADOW_RADIUS = 112.9
 /** How far the edge frays, as a fraction of the radius. */
-const EDGE_FRAY = 0.035
+const EDGE_FRAY = 0.02
 
 export const STUB_HEIGHT = 0.06
+/** Height of a blade the moment it sprouts back. It grows from here to its full height. */
+export const SPROUT_HEIGHT = 0.12
 export const WIND_DIR = { x: 0.928, z: 0.371 }
-export const PUSH_RADIUS = 0.9
-export const PUSH_STRENGTH = 0.32
+
+/** Things that bend grass away from them: you, the mower deck and the robots. */
+export const PUSHERS = 5
+/** A pusher nobody is using sits far off the map. */
+export const PARKED = 1e4
 
 /** Rows of vertices along a near blade. Picking walks the same rows the shader draws. */
 export const BLADE_SEGMENTS = 7
@@ -46,6 +51,12 @@ export type Field = {
 }
 
 export type Vec2 = { x: number; z: number }
+
+/**
+ * How tall each blade is: 0 for a cut stub, 255 for full height, anything between for a blade growing back.
+ * A blade counts as standing (cuttable, and still to do) whenever it's above 0.
+ */
+export type Growth = Uint8Array
 
 /** Small, fast seeded PRNG. Same seed, same sequence, forever. */
 export function mulberry32(seed: number) {
@@ -84,16 +95,15 @@ function heightSwell(x: number, z: number) {
   return 0.09 * Math.sin(x * 0.11 + 0.7) * Math.sin(z * 0.13 + 1.9) + 0.06 * Math.sin(x * 0.047 - z * 0.061 + 2.4)
 }
 
+const cellX = (c: number) => ((c % CELLS) + 0.05 + 0.9 * cellRandom(c, 0)) * CELL - MAP_HALF
+const cellZ = (c: number) => (Math.floor(c / CELLS) + 0.05 + 0.9 * cellRandom(c, 1)) * CELL - MAP_HALF
+
 export function createField(): Field {
   const total = CELLS * CELLS
-  const px = new Float32Array(total)
-  const pz = new Float32Array(total)
-  const score = new Float64Array(total)
+  const score = new Float32Array(total)
   for (let c = 0; c < total; c++) {
-    const x = ((c % CELLS) + 0.05 + 0.9 * cellRandom(c, 0)) * CELL - MAP_HALF
-    const z = (Math.floor(c / CELLS) + 0.05 + 0.9 * cellRandom(c, 1)) * CELL - MAP_HALF
-    px[c] = x
-    pz[c] = z
+    const x = cellX(c)
+    const z = cellZ(c)
     // Below 1 is inside the outline. The noise frays the edge so the meadow doesn't end in a wall.
     score[c] = Math.hypot(x, z) / meadowEdge(Math.atan2(z, x)) + (cellRandom(c, 2) - 0.5) * EDGE_FRAY * 2
   }
@@ -135,8 +145,8 @@ export function createField(): Field {
     }
     for (const c of cells) {
       const i = n++
-      const x = px[c]
-      const z = pz[c]
+      const x = cellX(c)
+      const z = cellZ(c)
       field.x[i] = x
       field.z[i] = z
       field.yaw[i] = cellRandom(c, 3) * Math.PI * 2
@@ -153,6 +163,18 @@ export function createField(): Field {
   return field
 }
 
+/** True if (x, z) lies inside the meadow outline, pulled in by `margin` metres. */
+export function inMeadow(field: Field, x: number, z: number, margin = 0) {
+  return Math.hypot(x, z) < meadowEdge(Math.atan2(z, x)) * field.edgeScale - margin
+}
+
+/** How tall blade i stands right now, in metres. Cut blades report their full height (the shader draws a stub). */
+export function grownHeight(field: Field, growth: Growth, i: number) {
+  const g = growth[i]
+  const h = field.height[i]
+  return g === 0 || g === 255 ? h : SPROUT_HEIGHT + (h - SPROUT_HEIGHT) * (g / 255)
+}
+
 function clampCell(v: number) {
   return Math.min(CELLS - 1, Math.max(0, v))
 }
@@ -163,19 +185,36 @@ export function cellCoord(v: number) {
 }
 
 /** Calls visit for every standing blade whose base is within r of (x, z). */
-export function forEachStandingNear(field: Field, cut: Uint8Array, x: number, z: number, r: number, visit: (i: number) => void) {
+export function forEachStandingNear(field: Field, growth: Growth, x: number, z: number, r: number, visit: (i: number) => void) {
   const r2 = r * r
   const maxX = cellCoord(x + r)
   const maxZ = cellCoord(z + r)
   for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
     for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
       const i = field.cellBlade[cz * CELLS + cx]
-      if (i < 0 || cut[i]) continue
+      if (i < 0 || growth[i] === 0) continue
       const dx = field.x[i] - x
       const dz = field.z[i] - z
       if (dx * dx + dz * dz <= r2) visit(i)
     }
   }
+}
+
+/** Offsets to the eight neighbouring grid cells. */
+const NEIGHBOURS = [-1 - CELLS, -CELLS, 1 - CELLS, -1, 1, CELLS - 1, CELLS, CELLS + 1]
+
+/**
+ * One try at regrowth: a random blade, and if it stands, a random neighbour of it. Returns that neighbour
+ * if it's a cut blade ready to sprout, or -1. Grass only spreads from grass, so a patch you've cleared
+ * completely stays clear, and an empty meadow never grows back.
+ */
+export function regrowthCandidate(field: Field, growth: Growth, rand: () => number) {
+  const i = Math.floor(rand() * BLADE_COUNT)
+  if (growth[i] === 0) return -1
+  const c = field.cellOf[i] + NEIGHBOURS[Math.floor(rand() * 8)]
+  if (c < 0 || c >= field.cellBlade.length) return -1
+  const j = field.cellBlade[c]
+  return j >= 0 && growth[j] === 0 ? j : -1
 }
 
 function smoothstep(e0: number, e1: number, v: number) {
@@ -189,11 +228,11 @@ export function bladeTaper(t: number) {
 }
 
 /**
- * Horizontal lean (per unit of t² · height) from wind and from the player brushing through.
- * Mirrors bladeLean() in the grass shader so picking hits exactly what is drawn. The shader also bends
- * blades away from the lawn mower, but the mower is parked out of reach whenever picking runs.
+ * Horizontal lean (per unit of t² · height) from wind and from everything pushing through the grass.
+ * `pushers` holds x, z, radius, strength for each of the PUSHERS. Mirrors bladeLean() in the grass
+ * shader so picking hits exactly what is drawn.
  */
-export function bladeLean(bx: number, bz: number, time: number, player: Vec2, out: Vec2) {
+export function bladeLean(bx: number, bz: number, time: number, pushers: Float32Array, out: Vec2) {
   const gust = 0.55 + 0.45 * Math.sin(time * 0.55 - (bx * WIND_DIR.x + bz * WIND_DIR.z) * 0.22)
   const phase = time * 1.7 + bx * 0.37 + bz * 0.23
   const sway = Math.sin(phase) * 0.6 + Math.sin(phase * 2.3 + 1.7) * 0.25
@@ -201,12 +240,15 @@ export function bladeLean(bx: number, bz: number, time: number, player: Vec2, ou
   out.x = WIND_DIR.x * wind
   out.z = WIND_DIR.z * wind
 
-  const dx = bx - player.x
-  const dz = bz - player.z
-  const dist = Math.max(Math.hypot(dx, dz), 1e-4)
-  const push = (1 - smoothstep(0, PUSH_RADIUS, dist)) * PUSH_STRENGTH
-  out.x += (dx / dist) * push
-  out.z += (dz / dist) * push
+  for (let p = 0; p < PUSHERS * 4; p += 4) {
+    const dx = bx - pushers[p]
+    const dz = bz - pushers[p + 1]
+    const dist = Math.max(Math.hypot(dx, dz), 1e-4)
+    if (dist >= pushers[p + 2]) continue
+    const push = (1 - smoothstep(0, pushers[p + 2], dist)) * pushers[p + 3]
+    out.x += (dx / dist) * push
+    out.z += (dz / dist) * push
+  }
   return out
 }
 
@@ -227,7 +269,7 @@ const MAX_TIP_OFFSET = 1.3
  * Finds the nearest standing blade along the ray within reach. Writes it to `out` and returns true, or returns false.
  * Only checks grid cells near the ray, then tests the blade's bent centreline segment by segment.
  */
-export function pickBlade(field: Field, cut: Uint8Array, ray: Ray, reach: number, time: number, player: Vec2, out: Pick) {
+export function pickBlade(field: Field, growth: Growth, ray: Ray, reach: number, time: number, pushers: Float32Array, out: Pick) {
   // Never pick through the ground.
   let maxS = reach
   if (ray.dy < 0) maxS = Math.min(maxS, -ray.oy / ray.dy)
@@ -245,12 +287,12 @@ export function pickBlade(field: Field, cut: Uint8Array, ray: Ray, reach: number
   for (let cz = minCz; cz <= maxCz; cz++) {
     for (let cx = minCx; cx <= maxCx; cx++) {
       const i = field.cellBlade[cz * CELLS + cx]
-      if (i < 0 || cut[i]) continue
+      if (i < 0 || growth[i] === 0) continue
 
       const bx = field.x[i]
       const bz = field.z[i]
-      const h = field.height[i]
-      bladeLean(bx, bz, time, player, lean)
+      const h = grownHeight(field, growth, i)
+      bladeLean(bx, bz, time, pushers, lean)
       const fx = Math.sin(field.yaw[i]) * field.bend[i] + lean.x
       const fz = Math.cos(field.yaw[i]) * field.bend[i] + lean.z
 
@@ -294,7 +336,7 @@ function distToSegment2D(x: number, z: number, ax: number, az: number, bx: numbe
 const segResult = { s: 0, u: 0, dist: 0 }
 
 /** Closest approach between a ray (unit direction) and segment P0→P1. s is along the ray, u along the segment. */
-function raySegment(ray: Ray, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) {
+export function raySegment(ray: Ray, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) {
   const vx = x1 - x0
   const vy = y1 - y0
   const vz = z1 - z0

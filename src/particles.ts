@@ -224,6 +224,8 @@ function sparksMaterial(uTime: { value: number }) {
 
 const CONFETTI_COLORS = ['#ff4d6d', '#ffd166', '#06d6a0', '#1b9aaa', '#f78c6b', '#c77dff', '#ffffff'].map((c) => new Color(c))
 const CHIP_COLORS = ['#3d6b1c', '#56862a', '#7a9a35', '#2f5516'].map((c) => new Color(c))
+const PETAL_COLORS = ['#ffd23a', '#f2b415', '#ffe27a', '#3a2210', '#4b8a2b'].map((c) => new Color(c))
+const GOLD_COLORS = ['#ffd84d', '#f5b82e', '#fff2a8'].map((c) => new Color(c))
 
 /** HDR colours: tone mapping turns the excess into glow. */
 const FIREWORK_COLORS = [
@@ -337,6 +339,26 @@ export function createParticles() {
         )
         const c = CHIP_COLORS[Math.floor(rand() * CHIP_COLORS.length)]
         bits.spawn(m, time, 0.9 + rand() * 0.6, c, 0.014 + rand() * 0.012, 0, 10 + rand() * 20, 0.5 + rand() * 1.5, rand())
+      }
+    },
+    /** A sunflower torn apart: petals and bits of stem flung out from its head. */
+    petals(x: number, y: number, z: number, time: number) {
+      for (let i = 0; i < 70; i++) {
+        const d = randomDir()
+        const speed = 1.5 + rand() * 3
+        set(x, y, z, d.x * speed, Math.abs(d.y) * speed + 1, d.z * speed, 2.5, 6)
+        const c = PETAL_COLORS[Math.floor(rand() * PETAL_COLORS.length)]
+        bits.spawn(m, time, 1.6 + rand() * 1.2, c, 0.03 + rand() * 0.02, 0.25, 6 + rand() * 10, 0.6, rand())
+      }
+    },
+    /** Gold flecks bursting up from a sunflower snipped clean. */
+    sparkle(x: number, y: number, z: number, time: number) {
+      for (let i = 0; i < 60; i++) {
+        const a = rand() * Math.PI * 2
+        const out = 0.8 + rand() * 2
+        set(x, y, z, Math.cos(a) * out, 2.5 + rand() * 3, Math.sin(a) * out, 3, 5)
+        const c = GOLD_COLORS[Math.floor(rand() * GOLD_COLORS.length)]
+        bits.spawn(m, time + rand() * 0.1, 1.4 + rand(), c, 0.02, 0.15, 8 + rand() * 8, 1, rand())
       }
     },
     /**

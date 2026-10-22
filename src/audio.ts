@@ -1,5 +1,5 @@
 // Every sound is synthesised: filtered noise for wind, rustling, swooshes and bangs, oscillators for
-// metal, the mower engine and fanfares.
+// metal, engines, coins, robot beeps, the farmer's voice and fanfares.
 
 const MUTE_KEY = 'grass-cutter/muted'
 const VOLUME = 0.8
@@ -7,11 +7,23 @@ const VOLUME = 0.8
 /** Equal-tempered note frequency, counting semitones from A4. */
 const note = (semitones: number) => 440 * 2 ** (semitones / 12)
 
+/** How each engine sounds: firing note, how bright, how loud and the pitch of the blade whirr. */
+const ENGINES = {
+  mower: { hz: 42, bright: 520, level: 0.11, whirr: 1100 },
+  rider: { hz: 33, bright: 420, level: 0.13, whirr: 900 },
+  trimmer: { hz: 118, bright: 1900, level: 0.07, whirr: 3200 },
+} as const
+export type EngineKind = keyof typeof ENGINES
+
+/** Volume and stereo position for a sound made somewhere else, like a robot's snip. */
+export type Placement = { volume: number; pan: number }
+const HERE: Placement = { volume: 1, pan: 0 }
+
 export function createAudio() {
   let ctx: AudioContext | null = null
   let master: GainNode | null = null
   let noise: AudioBuffer | null = null
-  let engine: ReturnType<typeof createEngine> | null = null
+  const engines = new Map<string, ReturnType<typeof createEngine>>()
   let muted = readMuted()
 
   function readMuted() {
@@ -124,18 +136,29 @@ export function createAudio() {
     osc.stop(at + length + 0.02)
   }
 
+  /** Placed somewhere: through a panner, at a volume. */
+  function placed(ac: AudioContext, out: AudioNode, at: Placement) {
+    const pan = ac.createStereoPanner()
+    pan.pan.value = Math.max(-1, Math.min(1, at.pan))
+    const gain = ac.createGain()
+    gain.gain.value = at.volume
+    pan.connect(gain).connect(out)
+    return pan
+  }
+
   /** Two-stroke engine: a sawtooth through a lowpass, a rumble and a whirr that rises while cutting. */
-  function createEngine(ac: AudioContext, out: GainNode, buffer: AudioBuffer) {
+  function createEngine(ac: AudioContext, out: GainNode, buffer: AudioBuffer, kind: EngineKind) {
+    const sound = ENGINES[kind]
     const level = ac.createGain()
     level.gain.value = 0
     level.connect(out)
 
     const tone = ac.createOscillator()
     tone.type = 'sawtooth'
-    tone.frequency.value = 42
+    tone.frequency.value = sound.hz
     const toneFilter = ac.createBiquadFilter()
     toneFilter.type = 'lowpass'
-    toneFilter.frequency.value = 520
+    toneFilter.frequency.value = sound.bright
     toneFilter.Q.value = 2
     const toneGain = ac.createGain()
     toneGain.gain.value = 0.55
@@ -144,7 +167,7 @@ export function createAudio() {
     // The putter: amplitude pulses at the firing rate.
     const pulse = ac.createOscillator()
     pulse.type = 'square'
-    pulse.frequency.value = 21
+    pulse.frequency.value = sound.hz / 2
     const pulseDepth = ac.createGain()
     pulseDepth.gain.value = 0.25
     pulse.connect(pulseDepth).connect(toneGain.gain)
@@ -165,7 +188,7 @@ export function createAudio() {
     whirr.loop = true
     const whirrFilter = ac.createBiquadFilter()
     whirrFilter.type = 'bandpass'
-    whirrFilter.frequency.value = 1100
+    whirrFilter.frequency.value = sound.whirr
     whirrFilter.Q.value = 1.2
     const whirrGain = ac.createGain()
     whirrGain.gain.value = 0
@@ -178,12 +201,12 @@ export function createAudio() {
 
     return {
       /** on: engine running. load: 0..1, how much grass is going through. speed: 0..1, how fast it's pushed. */
-      set(on: boolean, load: number, speed: number) {
+      set(on: boolean, load: number, speed: number, volume: number) {
         const t = ac.currentTime
-        level.gain.setTargetAtTime(on ? 0.11 : 0, t, on ? 0.15 : 0.25)
+        level.gain.setTargetAtTime(on ? sound.level * volume : 0, t, on ? 0.15 : 0.25)
         const rpm = 1 + speed * 0.12 - load * 0.08
-        tone.frequency.setTargetAtTime(42 * rpm, t, 0.2)
-        pulse.frequency.setTargetAtTime(21 * rpm, t, 0.2)
+        tone.frequency.setTargetAtTime(sound.hz * rpm, t, 0.2)
+        pulse.frequency.setTargetAtTime((sound.hz / 2) * rpm, t, 0.2)
         whirrGain.gain.setTargetAtTime(load * 0.55, t, 0.08)
       },
     }
@@ -214,31 +237,33 @@ export function createAudio() {
       if (ctx?.state === 'suspended') void ctx.resume()
     },
     /** The nail clipper closing: a sharp click and a short metallic ring. */
-    snip() {
+    snip(at = HERE) {
       const ac = ensure()
       if (!master) return
+      const out = placed(ac, master, at)
       const t = ac.currentTime
-      noiseBurst(ac, master, t, 0.035, 'highpass', 3200, 0.7, 0.5)
+      noiseBurst(ac, out, t, 0.035, 'highpass', 3200, 0.7, 0.5)
       for (const [freq, vol] of [[3150, 0.05], [4720, 0.03], [6900, 0.015]] as const) {
-        ping(ac, master, t, freq * (0.98 + Math.random() * 0.04), vol, 0.14)
+        ping(ac, out, t, freq * (0.98 + Math.random() * 0.04), vol, 0.14)
       }
     },
-    /** Shears closing: two blades scraping past each other, then a dull clack. */
-    shear() {
+    /** Scissors closing: two blades scraping past each other, then a small clack. */
+    shear(at = HERE) {
       const ac = ensure()
       if (!master) return
+      const out = placed(ac, master, at)
       const t = ac.currentTime
-      const scrape = noiseBurst(ac, master, t, 0.09, 'bandpass', 2400, 1.4, 0.32)
-      scrape?.frequency.exponentialRampToValueAtTime(5200, t + 0.08)
-      noiseBurst(ac, master, t + 0.075, 0.05, 'lowpass', 900, 0.8, 0.35)
-      for (const [freq, vol] of [[1850, 0.035], [2760, 0.02]] as const) ping(ac, master, t + 0.075, freq * (0.97 + Math.random() * 0.06), vol, 0.12)
+      const scrape = noiseBurst(ac, out, t, 0.08, 'bandpass', 2800, 1.4, 0.3)
+      scrape?.frequency.exponentialRampToValueAtTime(6000, t + 0.07)
+      noiseBurst(ac, out, t + 0.065, 0.04, 'lowpass', 1300, 0.8, 0.3)
+      for (const [freq, vol] of [[2350, 0.035], [3510, 0.02]] as const) ping(ac, out, t + 0.065, freq * (0.97 + Math.random() * 0.06), vol, 0.1)
     },
     /** A sickle cutting through air. */
-    swoosh() {
+    swoosh(at = HERE) {
       const ac = ensure()
       if (!master) return
       const t = ac.currentTime
-      const filter = noiseBurst(ac, master, t, 0.26, 'bandpass', 500, 1.1, 0.28)
+      const filter = noiseBurst(ac, placed(ac, master, at), t, 0.26, 'bandpass', 500, 1.1, 0.28)
       if (!filter) return
       filter.frequency.setValueAtTime(500, t)
       filter.frequency.exponentialRampToValueAtTime(2200, t + 0.1)
@@ -253,13 +278,96 @@ export function createAudio() {
       pan.connect(live.out)
       noiseBurst(live.ac, pan, live.ac.currentTime + delay, length, 'bandpass', 1400 + Math.random() * 900, 0.6, volume)
     },
-    /** Keeps the mower engine in step with the game. Cheap to call every frame. */
-    mower(on: boolean, load: number, speed: number) {
-      if (!on && !engine) return
+    /**
+     * Keeps one engine in step with the game: `slot` names whose it is ('you', 'robots'), `kind` which
+     * machine. Cheap to call every frame. Switching kind in a slot stops the old engine.
+     */
+    engine(slot: string, kind: EngineKind | null, on: boolean, load: number, speed: number, volume = 1) {
+      for (const k of Object.keys(ENGINES)) {
+        const key = `${slot}:${k}`
+        const engine = engines.get(key)
+        if (k !== kind) {
+          engine?.set(false, 0, 0, 0)
+          continue
+        }
+        if (!on && !engine) continue
+        const live = running()
+        if (!live || !noise || !kind) continue
+        const made = engine ?? createEngine(live.ac, live.out, noise, kind)
+        engines.set(key, made)
+        made.set(on, load, speed, volume)
+      }
+    },
+    /** Coins changing hands at the stall. */
+    kaching() {
+      const ac = ensure()
+      if (!master) return
+      const t = ac.currentTime
+      noiseBurst(ac, master, t, 0.06, 'highpass', 4000, 0.7, 0.25)
+      ping(ac, master, t + 0.02, note(19), 0.09, 0.25, 'triangle')
+      ping(ac, master, t + 0.1, note(26), 0.09, 0.6, 'triangle')
+      ping(ac, master, t + 0.1, note(38), 0.025, 0.4)
+      for (let i = 0; i < 5; i++) ping(ac, master, t + 0.18 + i * 0.045, note(31 + (i % 2) * 5), 0.02, 0.12)
+    },
+    /** A sunflower snipped clean: a bright run of notes and a coin. */
+    harvest(at = HERE) {
       const live = running()
-      if (!live || !noise) return
-      engine ??= createEngine(live.ac, live.out, noise)
-      engine.set(on, load, speed)
+      if (!live) return
+      const out = placed(live.ac, live.out, at)
+      const t = live.ac.currentTime
+      ;[0, 4, 7, 12, 16].forEach((semi, i) => ping(live.ac, out, t + i * 0.06, note(semi + 3), 0.08, 0.4, 'triangle'))
+      ping(live.ac, out, t + 0.32, note(27), 0.06, 0.7, 'triangle')
+      ping(live.ac, out, t + 0.32, note(34), 0.03, 0.5)
+    },
+    /** A sunflower torn up by a tool that doesn't harvest: a crunch and a sad slide. */
+    ruin(at = HERE) {
+      const live = running()
+      if (!live) return
+      const out = placed(live.ac, live.out, at)
+      const t = live.ac.currentTime
+      noiseBurst(live.ac, out, t, 0.25, 'bandpass', 900, 0.8, 0.35)
+      const osc = live.ac.createOscillator()
+      osc.type = 'triangle'
+      osc.frequency.setValueAtTime(note(-5), t)
+      osc.frequency.exponentialRampToValueAtTime(note(-17), t + 0.5)
+      const gain = live.ac.createGain()
+      gain.gain.setValueAtTime(0.07, t)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.55)
+      osc.connect(gain).connect(out)
+      osc.start(t)
+      osc.stop(t + 0.6)
+    },
+    /** One syllable of the farmer's mumble. */
+    voice() {
+      const live = running()
+      if (!live) return
+      const { ac, out } = live
+      const t = ac.currentTime
+      const osc = ac.createOscillator()
+      osc.type = 'square'
+      osc.frequency.setValueAtTime(150 + Math.random() * 70, t)
+      osc.frequency.linearRampToValueAtTime(130 + Math.random() * 40, t + 0.08)
+      // A vowel-ish band, different each syllable.
+      const formant = ac.createBiquadFilter()
+      formant.type = 'bandpass'
+      formant.frequency.value = 600 + Math.random() * 900
+      formant.Q.value = 3
+      const gain = ac.createGain()
+      gain.gain.setValueAtTime(0, t)
+      gain.gain.linearRampToValueAtTime(0.09, t + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.09)
+      osc.connect(formant).connect(gain).connect(out)
+      osc.start(t)
+      osc.stop(t + 0.1)
+    },
+    /** A robot's happy beep-boop. */
+    beep(at = HERE) {
+      const live = running()
+      if (!live) return
+      const out = placed(live.ac, live.out, at)
+      const t = live.ac.currentTime
+      ping(live.ac, out, t, note(19), 0.05, 0.09, 'square')
+      ping(live.ac, out, t + 0.1, note(24), 0.05, 0.12, 'square')
     },
     /** A rising arpeggio and a pop, for reaching a new level. */
     levelUp() {

@@ -9,7 +9,7 @@ const BROWN = '#6b5634'
 const SERIF = '"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif'
 const SCRIPT = '"Snell Roundhand", "Apple Chancery", "Brush Script MT", "Segoe Script", cursive'
 
-export type CertificateInfo = { name: string; minutes: number; blades: number; date: Date }
+export type CertificateInfo = { name: string; duration: string; robots: number; date: Date }
 
 function fitFont(ctx: CanvasRenderingContext2D, text: string, style: string, size: number, family: string, maxWidth: number) {
   let s = size
@@ -61,7 +61,7 @@ function tuft(ctx: CanvasRenderingContext2D, x: number, y: number, lean: number,
   }
 }
 
-function seal(ctx: CanvasRenderingContext2D, x: number, y: number, blades: number) {
+function seal(ctx: CanvasRenderingContext2D, x: number, y: number) {
   // Ribbon tails behind the seal.
   ctx.fillStyle = '#2f6b2a'
   for (const side of [-1, 1]) {
@@ -98,10 +98,10 @@ function seal(ctx: CanvasRenderingContext2D, x: number, y: number, blades: numbe
   ctx.fillStyle = '#5a3d0c'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.font = `700 40px ${SERIF}`
-  ctx.fillText(blades.toLocaleString('en-US'), x, y - 10)
+  ctx.font = `700 46px ${SERIF}`
+  ctx.fillText('100%', x, y - 10)
   ctx.font = `600 22px ${SERIF}`
-  ctx.fillText('B L A D E S', x, y + 30)
+  ctx.fillText('M O W N', x, y + 32)
 }
 
 export function drawCertificate(info: CertificateInfo) {
@@ -143,15 +143,16 @@ export function drawCertificate(info: CertificateInfo) {
 
   ctx.fillStyle = BROWN
   ctx.font = `400 44px ${SERIF}`
-  ctx.fillText(`cut all ${info.blades.toLocaleString('en-US')} blades of grass in the meadow in`, cx, 735)
+  ctx.fillText('cut every blade of grass in the meadow in', cx, 735)
 
   ctx.fillStyle = INK
-  ctx.font = `700 150px ${SERIF}`
-  ctx.fillText(`${info.minutes} minute${info.minutes === 1 ? '' : 's'}`, cx, 895)
+  fitFont(ctx, info.duration, '700', 130, SERIF, 1500)
+  ctx.fillText(info.duration, cx, 885)
 
   ctx.fillStyle = BROWN
   ctx.font = `italic 36px ${SERIF}`
-  ctx.fillText('Started with a nail clipper. Finished with a lawn mower.', cx, 975)
+  const crew = info.robots === 0 ? 'no robots' : info.robots === 1 ? 'one robot' : `${['two', 'three'][info.robots - 2]} robots`
+  ctx.fillText(`Started with a nail clipper. Finished with ${crew} and a lot of patience.`, cx, 975)
 
   // Date on the left, signature on the right, seal between them.
   const lineY = 1180
@@ -172,7 +173,7 @@ export function drawCertificate(info: CertificateInfo) {
   ctx.fillText('D A T E', 470, lineY + 44)
   ctx.fillText('S I G N E D', WIDTH - 470, lineY + 44)
 
-  seal(ctx, cx, 1125, info.blades)
+  seal(ctx, cx, 1125)
   return canvas
 }
 

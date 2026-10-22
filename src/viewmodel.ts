@@ -15,6 +15,7 @@ import {
   Scene,
   Shape,
   SplineCurve,
+  TorusGeometry,
   Vector2,
   Vector3,
   type WebGLRenderer,
@@ -22,7 +23,7 @@ import {
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import { SUN_COLOR, SUN_DIR } from './light'
-import { CLIPPER, SHEARS, SICKLE, sickleSweep, type ToolId } from './tools'
+import { CLIPPER, SCISSORS, SICKLE, sickleSweep, type ToolId } from './tools'
 
 /** Seconds to lower one tool and raise the next. */
 const SWAP_TIME = 0.32
@@ -33,7 +34,7 @@ const chrome = new MeshStandardMaterial({ color: '#d4d8de', metalness: 1, roughn
 const brushed = new MeshStandardMaterial({ color: '#b4b9c0', metalness: 1, roughness: 0.35 })
 const steel = new MeshStandardMaterial({ color: '#c3c8cf', metalness: 1, roughness: 0.3 })
 const darkSteel = new MeshStandardMaterial({ color: '#5d6168', metalness: 0.9, roughness: 0.45 })
-const orangeGrip = new MeshStandardMaterial({ color: '#e0561b', roughness: 0.55 })
+const orangeGrip = new MeshStandardMaterial({ color: '#e0561b', roughness: 0.45 })
 const wood = new MeshStandardMaterial({ color: '#8a5530', roughness: 0.65 })
 
 /**
@@ -103,7 +104,7 @@ function rod(a: Vector3, b: Vector3, radius: number, material: MeshStandardMater
 }
 
 /** The nail clipper, built along +x in millimetres (jaws at the front), then turned to point into the screen. */
-function createClipper() {
+export function createClipper() {
   const lowerJaw = new Mesh(
     plate([[0, 0], [12, 0], [24, 0], [34, 0.1], [42, 0.5], [48, 1.4], [53, 2.9], [57, 4.6], [59, 5.4]], 13, 1.7, 6.5, 2),
     chrome,
@@ -165,65 +166,66 @@ function createClipper() {
 }
 
 /**
- * Garden shears in metres, blades pointing forward (-Z). Each half is a blade on one side of the pivot and
- * a handle on the other, so opening the handles opens the blades.
+ * Scissors in metres, blades pointing forward (-Z). Each half is a blade on one side of the pivot and a
+ * finger loop on the other, so opening the loops opens the blades.
  */
-function createShears() {
+export function createScissors() {
   const blade = new Shape()
-  blade.moveTo(0.0015, -0.012)
-  blade.lineTo(-0.014, -0.014)
-  blade.quadraticCurveTo(-0.034, 0.02, -0.03, 0.065)
-  blade.quadraticCurveTo(-0.024, 0.125, 0, 0.165)
+  blade.moveTo(0.0015, -0.006)
+  blade.lineTo(-0.009, -0.008)
+  blade.quadraticCurveTo(-0.0135, 0.035, -0.0075, 0.075)
+  blade.quadraticCurveTo(-0.0035, 0.1, 0.0004, 0.108)
   blade.lineTo(0.0015, 0.0)
   blade.closePath()
-  const bladeGeometry = flatPiece(blade, 0.0022, 0.0005)
+  const bladeGeometry = flatPiece(blade, 0.0018, 0.0004)
+  const loopGeometry = new TorusGeometry(0.016, 0.0048, 10, 28)
+  loopGeometry.rotateX(Math.PI / 2)
 
-  const half = () => {
+  const half = (loopScale: number) => {
     const group = new Group()
     group.add(new Mesh(bladeGeometry, steel))
-    // A dark bevel along the back of the blade.
-    const spine = rod(new Vector3(-0.026, 0.0012, -0.006), new Vector3(-0.022, 0.0012, -0.1), 0.0018, darkSteel)
-    group.add(spine)
-    const shank = rod(new Vector3(0.002, 0.0012, 0.008), new Vector3(0.02, 0.0012, 0.05), 0.0045, darkSteel)
-    group.add(shank)
-    group.add(rod(new Vector3(0.017, 0.0012, 0.045), new Vector3(0.042, 0.0012, 0.165), 0.0115, orangeGrip))
+    group.add(rod(new Vector3(0.0015, 0.001, 0.004), new Vector3(0.012, 0.001, 0.034), 0.0042, orangeGrip))
+    const loop = new Mesh(loopGeometry, orangeGrip)
+    loop.position.set(0.019, 0.001, 0.05)
+    loop.scale.set(loopScale, 1, 1.15)
+    group.add(loop)
     return group
   }
 
-  const left = half()
+  const left = half(1)
   left.position.y = 0.0004
-  const right = half()
+  // The thumb loop is rounder than the finger loop.
+  const right = half(0.8)
   right.scale.x = -1
-  right.position.y = -0.0034
-  const bolt = new Mesh(new CylinderGeometry(0.0065, 0.0065, 0.011, 18), chrome)
-  bolt.position.y = -0.0006
+  right.position.y = -0.0028
+  const screw = new Mesh(new CylinderGeometry(0.004, 0.004, 0.008, 16), chrome)
+  screw.position.y = -0.0005
 
   const body = new Group()
-  body.add(left, right, bolt)
-  body.scale.setScalar(0.62)
+  body.add(left, right, screw)
   // Blades nearly level, pointing ahead and in toward the crosshair.
-  body.rotation.set(0.05, 0.5, -0.18, 'YXZ')
+  body.rotation.set(0.05, 0.45, -0.2, 'YXZ')
 
   const holder = new Group()
   holder.add(body)
-  const open = 0.3
+  const open = 0.42
   return {
     holder,
-    rest: new Vector3(0.085, -0.07, -0.25),
-    actionTime: SHEARS.interval,
+    rest: new Vector3(0.075, -0.068, -0.2),
+    actionTime: SCISSORS.interval,
     animate(p: number) {
       const press = Math.sin(Math.PI * Math.min(1, p * 1.4))
       const angle = open * (1 - press) * 0.5
       left.rotation.y = angle
       right.rotation.y = -angle
-      holder.position.z -= press * 0.03
+      holder.position.z -= press * 0.025
       holder.position.y += press * 0.004
     },
   }
 }
 
 /** A sickle in metres: wooden handle toward you (+Z), crescent blade ahead curving to the left. */
-function createSickle() {
+export function createSickle() {
   // Outer and inner arcs of the crescent meet at the point.
   const blade = new Shape()
   blade.moveTo(0.006, -0.004)
@@ -280,11 +282,16 @@ function createSickle() {
   }
 }
 
-type HandTool = ReturnType<typeof createClipper>
+export type HandTool = ReturnType<typeof createClipper>
+export type HandToolId = 'clipper' | 'scissors' | 'sickle'
+
+/** Builds one of the tools you hold in your hand. Robots get their own copies. */
+export const createHandTool = (id: HandToolId): HandTool =>
+  id === 'clipper' ? createClipper() : id === 'scissors' ? createScissors() : createSickle()
 
 /**
  * The tool in your hand, drawn in its own scene on top of the world so it never clips into grass.
- * The lawn mower lives in the world instead, so with it out this scene is empty.
+ * The trimmer and the mowers live in the world instead, so with one of those out this scene is empty.
  */
 export function createViewmodel(renderer: WebGLRenderer) {
   const scene = new Scene()
@@ -300,7 +307,7 @@ export function createViewmodel(renderer: WebGLRenderer) {
 
   const hands: Partial<Record<ToolId, HandTool>> = {
     clipper: createClipper(),
-    shears: createShears(),
+    scissors: createScissors(),
     sickle: createSickle(),
   }
   for (const tool of Object.values(hands)) scene.add(tool.holder)

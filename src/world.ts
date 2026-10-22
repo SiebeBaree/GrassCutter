@@ -159,7 +159,7 @@ function createSky(daySky: Texture) {
     side: BackSide,
     depthWrite: false,
   })
-  const sky = new Mesh(new SphereGeometry(500, 48, 24), material)
+  const sky = new Mesh(new SphereGeometry(900, 48, 24), material)
   sky.frustumCulled = false
   sky.renderOrder = -1
   return sky
@@ -173,19 +173,19 @@ type GroundUniforms = {
 }
 
 function createGround(shared: GroundUniforms, edgeScale: number) {
-  const geometry = new PlaneGeometry(1000, 1000, 250, 250)
+  const geometry = new PlaneGeometry(1400, 1400, 280, 280)
   geometry.rotateX(-Math.PI / 2)
   const material = new ShaderMaterial({
     uniforms: { ...UniformsUtils.clone(UniformsLib.fog), ...lightUniforms, ...shared },
     vertexShader: /* glsl */ `
       varying vec3 vWorldPos;
       #include <fog_pars_vertex>
-      // Flat play area, rolling hills from 90 m out.
+      // Flat play area, rolling hills from 165 m out.
       float hillHeight(vec2 p) {
         float r = length(p);
         float a = atan(p.y, p.x);
         float n = 0.55 + 0.25 * sin(a * 3.0 + 0.7) + 0.15 * sin(a * 7.0 + 2.1) + 0.08 * sin(a * 13.0 + 4.2);
-        return smoothstep(90.0, 230.0, r) * n * 42.0;
+        return smoothstep(165.0, 380.0, r) * n * 60.0;
       }
       void main() {
         vec3 p = (modelMatrix * vec4(position, 1.0)).xyz;
@@ -235,7 +235,7 @@ function createGround(shared: GroundUniforms, edgeScale: number) {
         float meadow = 1.0 - smoothstep(-0.8, 0.8, length(p) - meadowEdge(atan(p.y, p.x)));
         vec3 soil = vec3(0.075, 0.058, 0.032) * (0.8 + 0.4 * detail);
         // Far away the grass is drawn sparser, so the ground beneath takes on its colour.
-        soil = mix(soil, vec3(0.06, 0.12, 0.022), smoothstep(20.0, 45.0, dist));
+        soil = mix(soil, vec3(0.06, 0.12, 0.022), smoothstep(20.0, 60.0, dist));
         vec3 stubble = mix(vec3(0.11, 0.19, 0.04), vec3(0.21, 0.25, 0.075), fine * 0.5 + medium * 0.3 + large * 0.4);
         // Fine grain of short grass up close.
         float grain = texture2D(uNoise, p * 2.3).a * 0.6 + texture2D(uNoise, p * 5.1).b * 0.4;
@@ -275,9 +275,9 @@ function createScenery() {
   const q = new Quaternion()
   const up = new Vector3(0, 1, 0)
 
-  for (let i = 0; i < 230; i++) {
+  for (let i = 0; i < 520; i++) {
     const angle = rand() * Math.PI * 2
-    const r = 70 + rand() * rand() * 70
+    const r = 142 + rand() * rand() * 110
     const x = Math.cos(angle) * r
     const z = Math.sin(angle) * r
     const scale = 0.9 + rand() * 0.9
@@ -306,9 +306,9 @@ function createScenery() {
   ]
 
   const rocks: Matrix4[] = []
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 70; i++) {
     const angle = rand() * Math.PI * 2
-    const r = 63 + rand() * 14
+    const r = 133 + rand() * 18
     const s = 0.25 + rand() * rand() * 1.1
     q.setFromAxisAngle(new Vector3(rand(), rand(), rand()).normalize(), rand() * Math.PI)
     rocks.push(new Matrix4().compose(new Vector3(Math.cos(angle) * r, s * 0.25, Math.sin(angle) * r), q, new Vector3(s * 1.3, s * 0.7, s)))

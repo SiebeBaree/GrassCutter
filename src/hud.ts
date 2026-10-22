@@ -1,14 +1,17 @@
-import { BLADE_COUNT } from './field'
-import { levelRange, MAX_LEVEL, TOOLS, type ToolId } from './tools'
+import { priceOf, type Holdings, type Purchase } from './economy'
+import { ROBOT_COLORS } from './robots'
+import { MAX_ROBOTS, ROBOT_PRICES, TOOLS, type Tier } from './tools'
 
 const fmt = new Intl.NumberFormat('en-US')
-const TOTAL = fmt.format(BLADE_COUNT)
 const NAME_KEY = 'grass-cutter/name'
 
-export type MenuKind = 'welcome' | 'continue' | 'paused' | 'finished'
+export type MenuKind = 'welcome' | 'continue' | 'paused' | 'finished' | 'busy'
 
 /** What the menu reports about your progress. */
-export type Progress = { cut: number; level: number; minutes: number }
+export type Progress = { share: number; coins: number; minutes: number }
+
+/** Tool icons, rendered from the 3D models, by tier; plus the robot. */
+export type Icons = { tools: string[]; robot: string }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text = '') {
   const node = document.createElement(tag)
@@ -17,9 +20,24 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return node
 }
 
-export function formatMinutes(minutes: number) {
-  return `${fmt.format(minutes)} minute${minutes === 1 ? '' : 's'}`
+/** "3 hours 4 minutes", "1 hour", "48 minutes". */
+export function formatDuration(minutes: number) {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  const part = (n: number, unit: string) => `${fmt.format(n)} ${unit}${n === 1 ? '' : 's'}`
+  if (h === 0) return part(m, 'minute')
+  return m === 0 ? part(h, 'hour') : `${part(h, 'hour')} ${part(m, 'minute')}`
 }
+
+/** Share of the meadow cut, as text. Never rounds up to 100% while a blade still stands. */
+export function formatShare(share: number) {
+  if (share >= 1) return '100%'
+  const digits = share > 0.99 ? 2 : 1
+  const scale = 10 ** (digits + 2)
+  return `${(Math.floor(share * scale) / 10 ** digits).toFixed(digits)}%`
+}
+
+const coin = () => el('span', 'coin', 'b')
 
 function readName() {
   try {
@@ -33,25 +51,65 @@ type Handlers = {
   onStart: () => void
   onReset: () => void
   onCertificate: (name: string) => void
+  onBuy: (purchase: Purchase) => void
+  onLeaveShop: () => void
 }
 
-/** Crosshair, level and progress, toasts and the start/pause menu. Plain DOM over the canvas. */
+/** Crosshair, wallet, hotbar, toasts, the farmer's speech, the shop and the menus. Plain DOM over the canvas. */
 export function createHud(root: HTMLElement, handlers: Handlers) {
   const crosshair = el('div', 'crosshair')
 
+  const wallet = el('div', 'wallet')
+  const walletAmount = el('span', 'wallet-amount', '0')
+  wallet.append(coin(), walletAmount, el('span', 'wallet-unit', 'bCoins'))
+
   const status = el('div', 'status')
-  const statusTool = el('div', 'status-tool')
-  const bar = el('div', 'status-bar')
-  const fill = el('div', 'status-fill')
+  const meter = el('div', 'meter')
+  const bar = el('div', 'meter-bar')
+  const fill = el('div', 'meter-fill')
   bar.append(fill)
-  const statusCount = el('div', 'status-count')
-  status.append(statusTool, bar, statusCount)
+  const share = el('div', 'meter-share')
+  meter.append(bar, share)
+  const hotbar = el('div', 'hotbar')
+  const slots = TOOLS.map((tool, k) => {
+    const slot = el('div', 'slot')
+    slot.title = tool.name
+    const icon = el('img', 'slot-icon')
+    icon.alt = ''
+    slot.append(icon, el('span', 'slot-key', String(k + 1)))
+    hotbar.append(slot)
+    return { slot, icon }
+  })
+  const toolName = el('div', 'tool-name')
+  status.append(toolName, meter, hotbar)
+
+  const prompt = el('div', 'prompt')
+  prompt.append(el('kbd', '', 'E'), el('span', '', 'Shop'))
+  prompt.hidden = true
+
+  const bubble = el('div', 'bubble')
+  bubble.hidden = true
 
   const toast = el('div', 'toast')
   const toastTitle = el('div', 'toast-title')
   const toastDetail = el('div', 'toast-detail')
   toast.append(toastTitle, toastDetail)
 
+  // Shop.
+  const shop = el('div', 'shop')
+  const shopPanel = el('div', 'shop-panel')
+  const shopHead = el('div', 'shop-head')
+  const shopCoins = el('div', 'shop-coins')
+  shopHead.append(el('h2', 'shop-title', 'Farm Shop'), shopCoins)
+  const toolRows = el('div', 'shop-rows')
+  const robotRows = el('div', 'shop-rows')
+  const leave = el('button', 'shop-leave', 'Back to the meadow')
+  shopPanel.append(shopHead, el('h3', 'shop-section', 'Tools'), toolRows, el('h3', 'shop-section', 'Robots'), robotRows, leave)
+  shop.append(shopPanel)
+  shop.hidden = true
+  leave.addEventListener('click', () => handlers.onLeaveShop())
+
+  // Menu.
   const menu = el('div', 'menu')
   const title = el('h1', 'menu-title', 'Grass Cutter')
   const detail = el('p', 'menu-detail')
@@ -68,18 +126,25 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   certificate.append(nameInput, download)
 
   const reset = el('button', 'menu-reset', 'Start over')
-  const hint = el('p', 'menu-hint')
+  const hint = el('p', 'menu-hint', '1-6 or scroll for tools · E shop · M sound')
   menu.append(title, detail, start, certificate, reset, hint)
-  root.append(crosshair, status, toast, menu)
+  root.append(crosshair, wallet, status, prompt, bubble, toast, shop, menu)
 
   let confirmingReset = false
+  let menuKind: MenuKind = 'welcome'
   let toastTimer = 0
-  let shownCount = -1
-  let shownLevel = -1
-  let shownTool: ToolId | null = null
+  let shownCoins = -1
+  let shownShare = ''
+  let shownTool = -1
+  let shownTier = -1
+  let icons: Icons | null = null
+  let shopKey = ''
+  /** The rows rebuild after a purchase, so a double click would land on the next thing for sale. */
+  let boughtAt = -Infinity
 
   // The whole menu starts the game, except the reset button and the certificate form.
   menu.addEventListener('click', (e) => {
+    if (menuKind === 'busy') return
     if (e.target === reset || (e.target instanceof Node && certificate.contains(e.target))) return
     handlers.onStart()
   })
@@ -102,41 +167,169 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   // Typing a name shouldn't walk you around or toggle sound.
   nameInput.addEventListener('keydown', (e) => e.stopPropagation())
 
+  function price(amount: number) {
+    const tag = el('span', 'price')
+    tag.append(coin(), document.createTextNode(fmt.format(amount)))
+    return tag
+  }
+
+  function row(icon: string, name: string, about: string, action: HTMLElement, color?: string) {
+    const r = el('div', 'shop-row')
+    const img = el('img', 'shop-icon')
+    img.src = icon
+    img.alt = ''
+    const text = el('div', 'shop-text')
+    const label = el('div', 'shop-name', name)
+    if (color) {
+      const dot = el('span', 'shop-dot')
+      dot.style.background = color
+      label.prepend(dot)
+    }
+    text.append(label, el('div', 'shop-about', about))
+    r.append(img, text, action)
+    return r
+  }
+
+  function buyButton(holdings: Holdings, purchase: Purchase, label: string) {
+    const cost = priceOf(holdings, purchase)
+    const button = el('button', 'shop-buy')
+    if (cost === null) return button
+    button.append(el('span', '', label), price(cost))
+    button.disabled = cost > holdings.coins
+    button.addEventListener('click', (e) => {
+      if (e.detail > 1 || performance.now() - boughtAt < 400) return
+      boughtAt = performance.now()
+      handlers.onBuy(purchase)
+    })
+    return button
+  }
+
+  function renderShop(h: Holdings) {
+    shopCoins.replaceChildren(coin(), document.createTextNode(fmt.format(Math.floor(h.coins))))
+    // Rebuild the rows only when what you own or what you can afford changed.
+    const purchases: Purchase[] = [{ kind: 'tool' }, { kind: 'robot' }, ...h.robots.map((_, robot) => ({ kind: 'robotTool' as const, robot }))]
+    const key = [h.tier, h.robots.map((r) => r.tier).join(), purchases.map((p) => (priceOf(h, p) ?? Infinity) <= h.coins).join()].join('|')
+    if (key === shopKey || !icons) return
+    shopKey = key
+
+    toolRows.replaceChildren(
+      ...TOOLS.map((tool, k) => {
+        const action =
+          k <= h.tier
+            ? el('span', 'shop-owned', 'Owned')
+            : k === h.tier + 1
+              ? buyButton(h, { kind: 'tool' }, 'Buy')
+              : el('span', 'shop-later', `After the ${TOOLS[k - 1].name.toLowerCase()}`)
+        return row(icons?.tools[k] ?? '', tool.name, tool.about, action)
+      }),
+    )
+
+    const robots: HTMLElement[] = []
+    for (let k = 0; k < MAX_ROBOTS; k++) {
+      const robot = h.robots[k]
+      const name = `Robot ${k + 1}`
+      if (robot) {
+        const next = robot.tier < 5 ? TOOLS[robot.tier + 1] : null
+        const action = next ? buyButton(h, { kind: 'robotTool', robot: k }, next.name) : el('span', 'shop-owned', 'Fully kitted')
+        robots.push(row(icons?.robot ?? '', name, `Cuts with the ${TOOLS[robot.tier].name.toLowerCase()}`, action, ROBOT_COLORS[k]))
+      } else if (k === h.robots.length) {
+        robots.push(row(icons?.robot ?? '', name, 'Cuts grass on its own at half your pace. Comes with a nail clipper.', buyButton(h, { kind: 'robot' }, 'Buy'), ROBOT_COLORS[k]))
+      } else {
+        const later = el('span', 'shop-later')
+        later.append(price(ROBOT_PRICES[k]))
+        robots.push(row(icons?.robot ?? '', name, `After robot ${k}`, later, ROBOT_COLORS[k]))
+      }
+    }
+    robotRows.replaceChildren(...robots)
+  }
+
   return {
-    /** Level, tool in hand and progress bar. Cheap to call every frame; only touches the DOM on change. */
-    setProgress(cut: number, level: number, tool: ToolId) {
-      if (cut === shownCount && level === shownLevel && tool === shownTool) return
-      shownCount = cut
-      shownLevel = level
-      shownTool = tool
-      statusTool.textContent = `Level ${level} · ${TOOLS.find((t) => t.id === tool)?.name}`
-      const range = levelRange(level)
-      const [from, to] = range ? [range.from, range.to] : [0, BLADE_COUNT]
-      fill.style.transform = `scaleX(${Math.min(1, (cut - from) / (to - from))})`
-      statusCount.textContent = cut === BLADE_COUNT ? `All ${TOTAL} blades cut` : `${fmt.format(cut)} / ${fmt.format(to)}`
+    setIcons(next: Icons) {
+      icons = next
+      slots.forEach(({ icon }, k) => (icon.src = next.tools[k]))
+      shopKey = ''
     },
-    setTarget(active: boolean) {
-      crosshair.classList.toggle('active', active)
+    /** Wallet, meadow progress and hotbar. Cheap to call every frame; only touches the DOM on change. */
+    update(coins: number, cutShare: number, tier: Tier, tool: Tier) {
+      const whole = Math.floor(coins)
+      if (whole !== shownCoins) {
+        shownCoins = whole
+        walletAmount.textContent = fmt.format(whole)
+      }
+      const text = formatShare(cutShare)
+      if (text !== shownShare) {
+        shownShare = text
+        share.textContent = `${text} cut`
+        fill.style.transform = `scaleX(${cutShare})`
+      }
+      if (tool !== shownTool || tier !== shownTier) {
+        shownTool = tool
+        shownTier = tier
+        toolName.textContent = TOOLS[tool].name
+        slots.forEach(({ slot }, k) => {
+          slot.classList.toggle('owned', k <= tier)
+          slot.classList.toggle('selected', k === tool)
+        })
+      }
     },
-    /** The mower needs no aim, so it hides the crosshair. */
+    /** Normal, aimed at grass, aimed at a sunflower. */
+    setTarget(target: 'none' | 'grass' | 'flower') {
+      crosshair.classList.toggle('active', target !== 'none')
+      crosshair.classList.toggle('flower', target === 'flower')
+    },
+    /** The mowers need no aim, so they hide the crosshair. */
     setCrosshair(visible: boolean) {
       crosshair.hidden = !visible
     },
+    setPrompt(visible: boolean) {
+      prompt.hidden = !visible
+    },
+    /** The farmer's words at screen position (x, y), or hide them with null. */
+    setBubble(text: string | null, x = 0, y = 0) {
+      if (text === null) {
+        bubble.hidden = true
+        return
+      }
+      bubble.hidden = false
+      if (bubble.textContent !== text) bubble.textContent = text
+      bubble.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px) translate(-50%, -100%)`
+    },
+    get shopOpen() {
+      return !shop.hidden
+    },
+    openShop(holdings: Holdings) {
+      shopKey = ''
+      renderShop(holdings)
+      shop.hidden = false
+      document.body.classList.add('in-shop')
+    },
+    /** Refreshes the shop while it's open, as robots earn. */
+    refreshShop(holdings: Holdings) {
+      if (!shop.hidden) renderShop(holdings)
+    },
+    closeShop() {
+      shop.hidden = true
+      document.body.classList.remove('in-shop')
+    },
     showMenu(kind: MenuKind, progress: Progress) {
+      menuKind = kind
       confirmingReset = false
       reset.textContent = 'Start over'
       reset.classList.remove('armed')
-      title.textContent = { welcome: '', continue: 'Grass Cutter', paused: 'Paused', finished: 'Meadow cleared' }[kind]
+      title.textContent = { welcome: '', continue: 'Grass Cutter', paused: 'Paused', finished: 'Meadow cleared', busy: 'Already open' }[kind]
       detail.textContent =
         kind === 'welcome'
           ? ''
-          : kind === 'finished'
-            ? `${TOTAL} blades in ${formatMinutes(progress.minutes)}`
-            : `Level ${progress.level} · ${fmt.format(progress.cut)} of ${TOTAL} blades cut`
+          : kind === 'busy'
+            ? 'Grass Cutter is running in another tab. Close it, then reload this one.'
+            : kind === 'finished'
+              ? `Every blade, in ${formatDuration(progress.minutes)}`
+              : `${formatShare(progress.share)} cut · ${fmt.format(Math.floor(progress.coins))} bCoins`
       start.textContent = kind === 'welcome' ? 'Click to start' : 'Click to continue'
+      start.hidden = kind === 'busy'
       certificate.hidden = kind !== 'finished'
-      reset.hidden = kind === 'welcome'
-      hint.textContent = progress.level > 1 && progress.level <= MAX_LEVEL ? `1-${progress.level} switch tools · M toggles sound` : 'M toggles sound'
+      reset.hidden = kind === 'welcome' || kind === 'busy'
+      hint.hidden = kind === 'busy'
       menu.classList.toggle('welcome', kind === 'welcome')
       menu.hidden = false
       document.body.classList.add('in-menu')
