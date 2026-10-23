@@ -179,8 +179,8 @@ type Kit =
   | { kind: 'rider'; rider: ReturnType<typeof createRider> }
 
 type Hooks = {
-  /** Pay out for blades a robot cut. */
-  onCut: (count: number, by: Cutter) => void
+  /** Pay out for blades a robot cut, `worth` bCoins in all. */
+  onCut: (worth: number, by: Cutter) => void
   /** A sound the robot made at (x, z). */
   onSound: (kind: 'snip' | 'shear' | 'swoosh' | 'beep', x: number, z: number) => void
   /** Engine noise from robot machines: the nearest running one and how far it is. */

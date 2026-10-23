@@ -39,7 +39,7 @@ Grass grows back while you play. A blade snipped out of tall grass is back in ab
 
 Two cows graze the meadow. Each eats about fifteen blades a minute, and every few minutes one of them leaves a pat. All the cut grass within two metres of it sprouts again, with a sunflower in the middle. Cows are solid, so walk or drive around them.
 
-A day lasts seven minutes and a night three. Some nights a UFO drifts over, hangs above the meadow with its beam on and shoots off. You'll hear it before you see it.
+A day lasts seven minutes and a night three. On half the nights a UFO glides in and stops in the sky in front of you. Its beam turns about a hundred blades purple and tall, and each one pays 100 bCoins when cut, by any tool. That's roughly 10,000 bCoins a visit. You'll hear it coming.
 
 Sunflowers come up now and then. Snip one with the nail clipper or scissors and the farmer pays 500 bCoins. Any other tool shreds it for nothing, robots included. A robot with clippers or scissors goes looking for them.
 
@@ -54,7 +54,7 @@ Everything you see and hear is generated in code: Three.js meshes, GLSL shaders,
 - `src/field.ts` places one blade per cell of a jittered 20 cm grid, keeping the cells furthest inside an organic outline. The grid doubles as the lookup for picking, for the tools' cutting areas and for regrowth. Picking runs the grass shader's wind and push math on the CPU, so the crosshair selects the blade you actually see.
 - `src/grass.ts` draws the meadow in 12 m chunks with four levels of detail. Far chunks draw fewer, wider blades with fewer segments. Each blade has a growth byte, so a sprout is drawn as a short blade that grows a step a few times a second. Only the bytes and density texels that changed are uploaded.
 - `src/cows.ts` walks the cows from patch to patch. They graze where they stand, step away when you get close and drop pats that call `grass.sproutAround()`.
-- `src/ufo.ts` decides at dusk whether tonight gets a visit. The saucer glides in on a path past you, hovers, then accelerates away. Its hum is pitched by its speed toward you.
+- `src/ufo.ts` decides at dusk whether tonight gets a visit. The saucer glides in, hovers over the meadow ahead of you, beams it and accelerates away. Its hum is pitched by its speed toward you. Beamed blades get a byte of their own in `src/grass.ts` that the shader reads to draw them purple and taller.
 - `src/robots.ts` gives each robot a target: a sunflower if it carries clippers or scissors, then the nearest grass, then the nearest patch no other robot has claimed. Machines prefer grass ahead of them, so they mow in lines.
 - `src/cutting.ts` holds how each tool cuts, shared by you and the robots.
 - `src/shop.ts` builds the stall and the farmer, who turns to face you and talks in a speech bubble. `src/icons.ts` photographs the tool models once at startup for the hotbar and the shop.

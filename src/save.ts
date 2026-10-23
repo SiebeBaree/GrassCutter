@@ -25,6 +25,7 @@ const ASIDE_KEY = 'grass-cutter/v3-unopened'
 const OLD_KEYS = ['grass-cutter/save']
 const MAX_SUNFLOWERS = 40
 const MAX_COWS = 8
+const MAX_ALIEN = 20_000
 
 const PlayerSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number(), pitch: z.number() })
 const SpotSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number() })
@@ -45,6 +46,8 @@ const HeaderSchema = z.object({
   finishedAt: z.number().nullable().catch(null),
   /** Added in 3.1. Missing from older saves, which then start a fresh herd. */
   cows: z.array(SpotSchema).max(MAX_COWS).catch([]),
+  /** Added in 3.1. Purple blades a UFO left standing, by blade index. */
+  alien: z.array(z.number().int().min(0).max(BLADE_COUNT - 1)).max(MAX_ALIEN).catch([]),
 })
 
 export type PlayerState = z.infer<typeof PlayerSchema>
@@ -65,6 +68,8 @@ export type Save = {
   playSeconds: number
   finishedAt: number | null
   cows: CowSave[]
+  /** Blades a UFO turned purple that are still standing. */
+  alien: number[]
 }
 
 const finite = (...values: number[]) => values.every(Number.isFinite)
@@ -85,6 +90,7 @@ export function encodeSave(save: Save, cellBlade: Int32Array) {
       playSeconds: Number.isFinite(save.playSeconds) ? save.playSeconds : 0,
       finishedAt: save.finishedAt,
       cows: save.cows.filter((c) => finite(c.x, c.z, c.yaw)).slice(0, MAX_COWS),
+      alien: save.alien.filter((i) => save.growth[i] > 0).slice(0, MAX_ALIEN),
     } satisfies z.input<typeof HeaderSchema>),
   )
   const bytes = new Uint8Array(4 + header.length + BLADE_COUNT / 8)
@@ -122,8 +128,8 @@ export function decodeSave(bytes: Uint8Array, cellBlade: Int32Array): Save | nul
     growth[i] = (bits[k >> 3] >> (k & 7)) & 1 ? 255 : 0
     k++
   }
-  const { version: _, tool, tier, ...rest } = parsed.data
-  return { ...rest, growth, tier, tool: tool <= tier ? tool : tier }
+  const { version: _, tool, tier, alien, ...rest } = parsed.data
+  return { ...rest, growth, tier, tool: tool <= tier ? tool : tier, alien: alien.filter((i) => growth[i] > 0) }
 }
 
 let key: Promise<CryptoKey> | null = null

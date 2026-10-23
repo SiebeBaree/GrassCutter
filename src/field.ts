@@ -20,6 +20,8 @@ const EDGE_FRAY = 0.02
 export const STUB_HEIGHT = 0.06
 /** Height of a blade the moment it sprouts back. It grows from here to its full height. */
 export const SPROUT_HEIGHT = 0.12
+/** How much taller a UFO's purple blade grows, as a share of its height. */
+export const ALIEN_TALL = 0.8
 export const WIND_DIR = { x: 0.928, z: 0.371 }
 
 /** Things that bend grass away from them: you, the mower deck, the robots and the cows. */
@@ -57,6 +59,9 @@ export type Vec2 = { x: number; z: number }
  * A blade counts as standing (cuttable, and still to do) whenever it's above 0.
  */
 export type Growth = Uint8Array
+
+/** How far each blade has turned purple and tall under a UFO's beam: 0 for ordinary grass, 255 all the way. */
+export type Alien = Uint8Array
 
 /** Small, fast seeded PRNG. Same seed, same sequence, forever. */
 export function mulberry32(seed: number) {
@@ -168,11 +173,15 @@ export function inMeadow(field: Field, x: number, z: number, margin = 0) {
   return Math.hypot(x, z) < meadowEdge(Math.atan2(z, x)) * field.edgeScale - margin
 }
 
-/** How tall blade i stands right now, in metres. Cut blades report their full height (the shader draws a stub). */
-export function grownHeight(field: Field, growth: Growth, i: number) {
+/**
+ * How tall blade i stands right now, in metres. Cut blades report their full height (the shader draws a
+ * stub). Purple blades from a UFO stand taller. Mirrors the grass shader.
+ */
+export function grownHeight(field: Field, growth: Growth, i: number, alien?: Alien) {
   const g = growth[i]
   const h = field.height[i]
-  return g === 0 || g === 255 ? h : SPROUT_HEIGHT + (h - SPROUT_HEIGHT) * (g / 255)
+  const grown = g === 0 || g === 255 ? h : SPROUT_HEIGHT + (h - SPROUT_HEIGHT) * (g / 255)
+  return g > 0 && alien ? grown * (1 + (ALIEN_TALL * alien[i]) / 255) : grown
 }
 
 function clampCell(v: number) {
@@ -263,13 +272,13 @@ const py = new Float32Array(BLADE_SEGMENTS + 1)
 const pz = new Float32Array(BLADE_SEGMENTS + 1)
 const PICK_TOLERANCE = 0.025
 /** No blade tip strays further than this from its base. */
-const MAX_TIP_OFFSET = 1.3
+const MAX_TIP_OFFSET = 2.2
 
 /**
  * Finds the nearest standing blade along the ray within reach. Writes it to `out` and returns true, or returns false.
  * Only checks grid cells near the ray, then tests the blade's bent centreline segment by segment.
  */
-export function pickBlade(field: Field, growth: Growth, ray: Ray, reach: number, time: number, pushers: Float32Array, out: Pick) {
+export function pickBlade(field: Field, growth: Growth, ray: Ray, reach: number, time: number, pushers: Float32Array, out: Pick, alien?: Alien) {
   // Never pick through the ground.
   let maxS = reach
   if (ray.dy < 0) maxS = Math.min(maxS, -ray.oy / ray.dy)
@@ -291,7 +300,7 @@ export function pickBlade(field: Field, growth: Growth, ray: Ray, reach: number,
 
       const bx = field.x[i]
       const bz = field.z[i]
-      const h = grownHeight(field, growth, i)
+      const h = grownHeight(field, growth, i, alien)
       bladeLean(bx, bz, time, pushers, lean)
       const fx = Math.sin(field.yaw[i]) * field.bend[i] + lean.x
       const fz = Math.cos(field.yaw[i]) * field.bend[i] + lean.z

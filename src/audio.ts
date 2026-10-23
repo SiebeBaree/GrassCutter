@@ -421,6 +421,28 @@ export function createAudio() {
           pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, at.pan)), t, 0.1)
           for (const o of oscillators) o.osc.frequency.setTargetAtTime(o.hz * pitch, t, 0.1)
         },
+        /** A wobbling sweep down as the beam switches on. */
+        beam(at: Placement) {
+          const t = ac.currentTime
+          const osc = ac.createOscillator()
+          osc.type = 'triangle'
+          osc.frequency.setValueAtTime(1400, t)
+          osc.frequency.exponentialRampToValueAtTime(240, t + 1.4)
+          const wobble = ac.createOscillator()
+          wobble.frequency.value = 14
+          const wobbleDepth = ac.createGain()
+          wobbleDepth.gain.value = 60
+          wobble.connect(wobbleDepth).connect(osc.frequency)
+          const gain = ac.createGain()
+          gain.gain.setValueAtTime(0, t)
+          gain.gain.linearRampToValueAtTime(0.16 * at.volume, t + 0.08)
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.6)
+          osc.connect(gain).connect(live.out)
+          for (const o of [osc, wobble]) {
+            o.start(t)
+            o.stop(t + 1.65)
+          }
+        },
         /** A rising zap as it shoots off. */
         zap(at: Placement) {
           const t = ac.currentTime

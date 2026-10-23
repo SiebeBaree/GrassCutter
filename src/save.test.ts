@@ -23,6 +23,7 @@ function sampleSave(): Save {
     playSeconds: 93.5,
     finishedAt: null,
     cows: [{ x: -8, z: 70, yaw: 1 }],
+    alien: [12, 500],
   }
 }
 
@@ -61,9 +62,10 @@ describe('save', () => {
   })
 
   it('opens saves from before the cows, with all their progress', () => {
-    const bytes = withHeader(encodeSave(sampleSave(), cellBlade), ({ cows: _, ...json }) => json)
+    const bytes = withHeader(encodeSave(sampleSave(), cellBlade), ({ cows: _, alien: __, ...json }) => json)
     const loaded = decodeSave(bytes, cellBlade)
     expect(loaded?.cows).toEqual([])
+    expect(loaded?.alien).toEqual([])
     expect(loaded?.coins).toBe(1234)
     expect(loaded?.growth[7]).toBe(0)
   })

@@ -48,7 +48,7 @@ export const NIGHT_SECONDS = 3 * 60
 /** Seconds dusk and dawn each take. */
 const TWILIGHT_SECONDS = 30
 /** How dark a night gets, where 0 is the fireworks sky. Dark enough for stars, light enough to mow. */
-const NIGHT_LEVEL = 0.04
+const NIGHT_LEVEL = 0.08
 
 /**
  * Daylight `seconds` into the game: 1 by day, NIGHT_LEVEL by night. A new game starts in the morning;

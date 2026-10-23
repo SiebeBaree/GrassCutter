@@ -27,6 +27,12 @@ export const ROBOT_PACE = 0.5
 export const SUNFLOWER_VALUE = 500
 export const harvests = (tool: ToolId) => tool === 'clipper' || tool === 'scissors'
 
+/**
+ * A UFO's beam turns the grass within `radius` purple and tall, about a hundred blades. Each pays `value`
+ * bCoins when cut, by any tool, until it's cut once.
+ */
+export const UFO_GRASS = { radius: 1.15, value: 100 }
+
 /** One blade per snip, the one under the crosshair. Distances are metres from your eyes, times in seconds. */
 export const CLIPPER = { reach: 2.1, interval: 0.2 }
 /** Every blade rooted within `radius` of the blade or ground under the crosshair. */

@@ -3,8 +3,8 @@ import type { Grass } from './grass'
 import type { Flower, Sunflowers } from './sunflowers'
 import { harvests, type ToolId } from './tools'
 
-// How each tool takes grass and sunflowers, shared by you and the robots. Every function returns how
-// many blades it cut; the caller pays for them.
+// How each tool takes grass and sunflowers, shared by you and the robots. Every function returns what
+// the blades it cut are worth in bCoins: one each, more for a UFO's purple ones. The caller pays.
 
 /** Who did the cutting: you, or robot 0, 1 or 2. */
 export type Cutter = 'you' | number
@@ -24,7 +24,7 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
     const facesAway = Math.sin(field.yaw[i]) * awayX + Math.cos(field.yaw[i]) * awayZ >= 0
     bladeLean(field.x[i], field.z[i], time, grass.pushers, lean)
     grass.dropClipping(i, time, !facesAway, lean)
-    return grass.cut(i) ? 1 : 0
+    return grass.cut(i)
   }
 
   /** Takes every standing flower in `flowers`: a harvest with the clipper or scissors, a loss with anything else. */
@@ -94,7 +94,7 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
       near.length = 0
       forEachStandingNear(field, growth, centre.x, centre.z, r, collect)
       let cut = 0
-      for (const i of near) if (inside(field.x[i], field.z[i]) && grass.cut(i, f)) cut++
+      for (const i of near) if (inside(field.x[i], field.z[i])) cut += grass.cut(i, f)
       flowersDown(
         sunflowers.near(centre.x, centre.z, r).filter((fl) => inside(fl.x, fl.z)),
         tool,

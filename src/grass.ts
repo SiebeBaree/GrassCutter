@@ -24,6 +24,7 @@ import {
   CELLS_PER_CHUNK,
   CHUNK,
   CHUNKS,
+  ALIEN_TALL,
   grownHeight,
   MAP_HALF,
   PARKED,
@@ -32,12 +33,14 @@ import {
   SPROUT_HEIGHT,
   STUB_HEIGHT,
   WIND_DIR,
+  type Alien,
   type Field,
   type Growth,
   type Vec2,
 } from './field'
 import { lightUniforms } from './light'
 import { createRing } from './ring'
+import { UFO_GRASS } from './tools'
 
 /** Seconds a cut blade takes to tip over and land. */
 const FALL_TIME = 0.95
@@ -54,6 +57,8 @@ const DENSITY_UPLOAD_SECONDS = 0.1
 /** Seconds a sprout takes to reach full height. Growth steps a few times a second, not every frame. */
 const GROW_SECONDS = 60
 const GROW_TICK = 0.25
+/** Seconds beamed grass takes to turn fully purple and tall. */
+const ALIEN_SECONDS = 5
 /**
  * Regrowth tries per second. Each picks a random blade and one of its neighbours, and sprouts the
  * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 3 minutes
@@ -82,6 +87,7 @@ const glslFloat = (v: number) => (Number.isInteger(v) ? `${v}.0` : `${v}`)
 const bladeCommon = /* glsl */ `
   #define STUB ${glslFloat(STUB_HEIGHT)}
   #define SPROUT ${glslFloat(SPROUT_HEIGHT)}
+  #define ALIEN_TALL ${glslFloat(ALIEN_TALL)}
   #define PUSHERS ${PUSHERS}
   const vec2 WIND_DIR = vec2(${glslFloat(WIND_DIR.x)}, ${glslFloat(WIND_DIR.z)});
 
@@ -103,6 +109,7 @@ const bladeCommon = /* glsl */ `
   varying float vDry;
   varying float vShade;
   varying float vHighlight;
+  varying float vAlien;
 
   float bladeTaper(float t) {
     return sqrt(clamp((1.0 - t) * 2.2, 0.0, 1.0));
@@ -155,6 +162,7 @@ const bladeFragment = /* glsl */ `
   varying float vDry;
   varying float vShade;
   varying float vHighlight;
+  varying float vAlien;
 
   #include <fog_pars_fragment>
 
@@ -174,6 +182,8 @@ const bladeFragment = /* glsl */ `
     albedo = mix(albedo, albedo * vec3(0.75, 1.0, 0.9), smoothstep(0.45, 0.15, vPatch) * 0.7);
     albedo = mix(albedo, albedo * vec3(1.35, 1.12, 0.55), smoothstep(0.75, 1.0, vTint));
     albedo = mix(albedo, vec3(0.36, 0.30, 0.13), vDry);
+    // Beamed by a UFO: deep violet at the root to bright lilac at the tip.
+    albedo = mix(albedo, mix(vec3(0.1, 0.02, 0.18), vec3(0.62, 0.26, 0.95), smoothstep(0.0, 1.0, vT)), vAlien);
 
     float ndl = dot(N, uSunDir);
     float diffuse = max(ndl, 0.0);
@@ -187,6 +197,8 @@ const bladeFragment = /* glsl */ `
     vec3 color = albedo * (ambient * vAO + sun * (diffuse + through * vec3(1.0, 1.15, 0.55)));
     color += sun * spec;
     color = mix(color, vec3(1.3, 1.15, 0.55), vHighlight * 0.35);
+    // A faint glow of their own, so they show at night.
+    color += vec3(0.3, 0.06, 0.5) * vAlien * vT * 0.45;
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
@@ -198,6 +210,7 @@ const bladeFragment = /* glsl */ `
 const standingVertex = /* glsl */ `
   ${bladeCommon}
   attribute float aGrowth; // 0 cut down to a stub, 1 full height, between: growing back
+  attribute float aAlien;  // 0 ordinary grass, 1 turned purple and tall by a UFO
   uniform float uWiden;
   uniform vec3 uHighlight; // x, z, radius: blades rooted inside glow
 
@@ -206,7 +219,7 @@ const standingVertex = /* glsl */ `
   void main() {
     float standing = step(0.001, aGrowth);
     // A sprout is the whole blade, shorter. Mirrors grownHeight() in field.ts.
-    float h = mix(aShape.x, mix(SPROUT, aShape.x, aGrowth), standing);
+    float h = mix(aShape.x, mix(SPROUT, aShape.x, aGrowth), standing) * (1.0 + ALIEN_TALL * aAlien * standing);
     // A cut blade collapses every row above the stub onto the cut line: a flat-topped stub.
     float t = min(position.y, mix(STUB / h, 1.0, standing));
     vec2 base = aBase.xy;
@@ -233,6 +246,7 @@ const standingVertex = /* glsl */ `
     vDry = 0.0;
     vShade = cloudShade(base);
     vHighlight = distance(base, uHighlight.xy) < uHighlight.z ? standing : 0.0;
+    vAlien = aAlien * standing;
     vWorldPos = p;
 
     vec4 mvPosition = viewMatrix * vec4(p, 1.0);
@@ -290,6 +304,7 @@ const clippingVertex = /* glsl */ `
     vDry = smoothstep(4.0, 90.0, age) * 0.85;
     vShade = cloudShade(aBase.xy);
     vHighlight = 0.0;
+    vAlien = 0.0;
     vWorldPos = p3;
 
     vec4 mvPosition = viewMatrix * vec4(p3, 1.0);
@@ -326,9 +341,10 @@ type Chunk = {
   minX: number
   minZ: number
   growthAttr: InstancedBufferAttribute
+  alienAttr: InstancedBufferAttribute
   /** One mesh per detail level. At most one is visible. */
   lods: Mesh[]
-  /** Blades changed since the GPU last got this chunk's growth bytes. */
+  /** Blades changed since the GPU last got this chunk's growth and alien bytes. */
   dirtyFrom: number
   dirtyTo: number
 }
@@ -339,6 +355,11 @@ type Chunk = {
  * This module owns writes to `growth`. `onDensity` hears about every density texel whose count changes.
  */
 export function createGrass(field: Field, growth: Growth, noise: Texture, onDensity: (d: number) => void) {
+  // Purple blades from UFO beams, the ones still turning, and every one still standing so the save can list them.
+  const alien: Alien = new Uint8Array(BLADE_COUNT)
+  const alienRising: number[] = []
+  const alienStanding = new Set<number>()
+  let alienCarry = 0
   // Density texture. R: uncut share of the texel. G, B: direction the mower last crossed it, 0.5 for never.
   const bladesPerCell = new Uint8Array(DENSITY_CELLS * DENSITY_CELLS)
   const uncutPerCell = new Uint8Array(DENSITY_CELLS * DENSITY_CELLS)
@@ -443,6 +464,8 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
     // A view into `growth`, read as 0..1: writes there land on the GPU at the next flush.
     const growthAttr = new InstancedBufferAttribute(growth.subarray(start, start + n), 1, true)
     growthAttr.setUsage(DynamicDrawUsage)
+    const alienAttr = new InstancedBufferAttribute(alien.subarray(start, start + n), 1, true)
+    alienAttr.setUsage(DynamicDrawUsage)
 
     const minX = (k % CHUNKS) * CHUNK - MAP_HALF
     const minZ = Math.floor(k / CHUNKS) * CHUNK - MAP_HALF
@@ -455,6 +478,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       geometry.setAttribute('aBase', baseAttr)
       geometry.setAttribute('aShape', shapeAttr)
       geometry.setAttribute('aGrowth', growthAttr)
+      geometry.setAttribute('aAlien', alienAttr)
       geometry.instanceCount = Math.ceil(n * lod.share)
       geometry.boundingSphere = bounds
       const mesh = new Mesh(geometry, lodMaterials[l])
@@ -462,7 +486,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       mesh.visible = false
       return mesh
     })
-    const chunk: Chunk = { k, start, minX, minZ, growthAttr, lods, dirtyFrom: Infinity, dirtyTo: -1 }
+    const chunk: Chunk = { k, start, minX, minZ, growthAttr, alienAttr, lods, dirtyFrom: Infinity, dirtyTo: -1 }
     // A chunk out of view uploads nothing, so its changes pile up as one range until it's drawn again.
     growthAttr.onUpload(() => {
       chunk.dirtyFrom = Infinity
@@ -521,6 +545,22 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
     growing.length = kept
   }
 
+  /** Turns beamed blades a step further purple and tall. */
+  const turnAlien = (seconds: number) => {
+    alienCarry += (255 * seconds) / ALIEN_SECONDS
+    const step = Math.floor(alienCarry)
+    alienCarry -= step
+    if (step === 0) return
+    let kept = 0
+    for (const i of alienRising) {
+      if (alien[i] === 0) continue
+      alien[i] = Math.min(255, alien[i] + step)
+      touch(i)
+      if (alien[i] < 255) alienRising[kept++] = i
+    }
+    alienRising.length = kept
+  }
+
   // Clippings: a ring of falling and fallen blades.
   const clipGeometryBase = createBladeGeometry(5)
   const clipBase = new InstancedBufferAttribute(new Float32Array(CLIPPING_SLOTS * 3), 3)
@@ -574,6 +614,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       shared.uTime.value = time
       if (time - grownAt >= GROW_TICK) {
         grow(Math.min(1, time - grownAt))
+        turnAlien(Math.min(1, time - grownAt))
         grownAt = time
       }
 
@@ -588,9 +629,11 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
         for (let l = 0; l < chunk.lods.length; l++) chunk.lods[l].visible = l === lod
 
         if (chunk.dirtyTo >= chunk.dirtyFrom) {
-          chunk.growthAttr.clearUpdateRanges()
-          chunk.growthAttr.addUpdateRange(chunk.dirtyFrom, chunk.dirtyTo - chunk.dirtyFrom + 1)
-          chunk.growthAttr.needsUpdate = true
+          for (const attr of [chunk.growthAttr, chunk.alienAttr]) {
+            attr.clearUpdateRanges()
+            attr.addUpdateRange(chunk.dirtyFrom, chunk.dirtyTo - chunk.dirtyFrom + 1)
+            attr.needsUpdate = true
+          }
         }
       }
 
@@ -620,9 +663,17 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
     setHighlight(x: number, z: number, radius: number) {
       highlight.value.set(x, z, radius)
     },
-    /** Cuts blade i down to a stub. Pass the mower's heading to stripe the ground it crossed. Returns false if it was already cut. */
+    /** How far each blade has turned purple. Read by picking. */
+    alien,
+    /**
+     * Cuts blade i down to a stub. Pass the mower's heading to stripe the ground it crossed. Returns what
+     * it's worth in bCoins: 1, UFO_GRASS.value for a purple blade, or 0 if it was already cut.
+     */
     cut(i: number, mowHeading?: Vec2) {
-      if (growth[i] === 0) return false
+      if (growth[i] === 0) return 0
+      const worth = alien[i] ? UFO_GRASS.value : 1
+      alien[i] = 0
+      alienStanding.delete(i)
       growth[i] = 0
       standingTotal--
       chunkStanding[touch(i).k]--
@@ -634,7 +685,45 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
         densityData[d * 4 + 2] = Math.round(127.5 + mowHeading.z * 127)
       }
       setDensity(d)
-      return true
+      return worth
+    },
+    /**
+     * A UFO's beam: every blade rooted within r of (x, z) stands up at full height, if it was cut, and starts
+     * turning purple and tall. Returns how many blades it caught.
+     */
+    beam(x: number, z: number, r: number) {
+      let count = 0
+      const maxX = cellCoord(x + r)
+      const maxZ = cellCoord(z + r)
+      for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
+        for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
+          const i = field.cellBlade[cz * CELLS + cx]
+          if (i < 0 || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
+          if (growth[i] === 0) sprout(i)
+          growth[i] = 255
+          touch(i)
+          if (alien[i] === 0) {
+            alien[i] = 1
+            alienRising.push(i)
+          }
+          alienStanding.add(i)
+          count++
+        }
+      }
+      return count
+    },
+    /** Purple blades still standing, for the save. */
+    alienBlades() {
+      return [...alienStanding]
+    },
+    /** Brings back purple blades from a save. Ones that are cut stay ordinary grass. */
+    restoreAlien(blades: readonly number[]) {
+      for (const i of blades) {
+        if (i < 0 || i >= BLADE_COUNT || growth[i] === 0) continue
+        alien[i] = 255
+        alienStanding.add(i)
+        touch(i)
+      }
     },
     /** Lets the meadow grow back for `seconds`: grass creeps into cut ground next to it. */
     regrow(seconds: number) {
@@ -668,7 +757,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       // Turning a blade half a circle and flipping its bend gives the same shape, facing the other way.
       const flip = backward ? -1 : 1
       clipBase.setXYZ(slot, field.x[i], field.z[i], field.yaw[i] + (backward ? Math.PI : 0))
-      clipShape.setXYZW(slot, grownHeight(field, growth, i), field.width[i], field.bend[i] * flip, field.tint[i])
+      clipShape.setXYZW(slot, grownHeight(field, growth, i, alien), field.width[i], field.bend[i] * flip, field.tint[i])
       // Rest a few millimetres apart so overlapping clippings don't flicker.
       clipFall.setXYZW(slot, startTime, 0.012 + ((i * 7919) % 97) / 97 / 40, lean.x, lean.z)
       lastDrop = startTime

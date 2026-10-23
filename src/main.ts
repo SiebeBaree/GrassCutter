@@ -22,9 +22,9 @@ import { createShop } from './shop'
 import { createSign } from './sign'
 import type { Flower } from './sunflowers'
 import { createSunflowers } from './sunflowers'
-import { CLIPPER, MOWER, RIDER, SCISSORS, SICKLE, sickleSweep, SUNFLOWER_VALUE, TIERS, TOOLS, TRIMMER, type Tier, type ToolId } from './tools'
+import { CLIPPER, MOWER, RIDER, SCISSORS, SICKLE, sickleSweep, SUNFLOWER_VALUE, TIERS, TOOLS, TRIMMER, UFO_GRASS, type Tier, type ToolId } from './tools'
 import { createTrimmer } from './trimmer'
-import { createUfo } from './ufo'
+import { createUfo, type Sighting } from './ufo'
 import { createViewmodel } from './viewmodel'
 import { createWorld } from './world'
 import './style.css'
@@ -85,6 +85,7 @@ let hasSave = saved !== null
 
 let minimap: Minimap | null = null
 const grass = createGrass(field, growth, createNoiseTexture(), (d) => minimap?.cellChanged(d))
+grass.restoreAlien(saved?.alien ?? [])
 const world = createWorld(renderer, grass.uniforms, field.edgeScale)
 const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
 const sign = createSign(maxAnisotropy)
@@ -156,7 +157,7 @@ const cows = createCows(field, growth, grass, sunflowers, saved?.cows ?? [], {
     if (at.volume > 0.02) audio.moo(at)
   },
 })
-const ufo = createUfo()
+const ufo = createUfo(field)
 world.scene.add(...grass.meshes, grass.clippings, sign.group, shop.group, mower.group, rider.group, trimmer.group, sunflowers.mesh, robots.group, cows.group, ufo.group, ...particles.meshes)
 
 const camera = new PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 1500)
@@ -204,6 +205,7 @@ function snapshot(): Save {
     playSeconds,
     finishedAt,
     cows: cows.states.map((c) => ({ ...c })),
+    alien: grass.alienBlades(),
   }
 }
 
@@ -295,7 +297,7 @@ function aim() {
   if (id !== 'clipper' && id !== 'scissors') return
   const reach = id === 'clipper' ? CLIPPER.reach : SCISSORS.reach
   const flower = sunflowers.pick(ray, reach)
-  pickBlade(field, growth, ray, reach, time, grass.pushers, pick)
+  pickBlade(field, growth, ray, reach, time, grass.pushers, pick, grass.alien)
   if (flower.flower && (pick.blade < 0 || flower.s < pick.s)) {
     flowerTarget = flower.flower
     pick.blade = -1
@@ -625,8 +627,11 @@ function bumpCows() {
   }
 }
 
-/** Keeps the UFO's hum where the UFO is, pitched up as it comes closer and down as it goes. */
-function hearUfo(seen: ReturnType<typeof ufo.update>) {
+/**
+ * Keeps the UFO's hum where the UFO is, pitched up as it comes closer and down as it goes, and turns the
+ * grass under its beam purple.
+ */
+function followUfo(seen: Sighting | null) {
   if (!seen) {
     ufoHum?.stop()
     ufoHum = null
@@ -636,7 +641,14 @@ function hearUfo(seen: ReturnType<typeof ufo.update>) {
   // Much louder than anything on the ground, so it carries from far off.
   const at = { volume: Math.min(1, 45 / seen.distance) ** 1.3, pan: placement(seen.x, seen.z).pan }
   ufoHum?.set(at, 343 / (343 - Math.max(-150, Math.min(150, seen.closing))))
-  if (seen.zap) ufoHum?.zap(at)
+  if (seen.beamed) {
+    ufoHum?.beam(at)
+    grass.beam(seen.x, seen.z, UFO_GRASS.radius)
+  }
+  if (seen.zapped) {
+    ufoHum?.zap(at)
+    hud.toast('The UFO left purple grass behind', 5, `${UFO_GRASS.value} bCoins a blade, cut any way you like`)
+  }
 }
 
 /** Where you and your tool bend the grass: pusher slots 0 and 1. Robots and cows fill the rest. */
@@ -766,7 +778,7 @@ renderer.setAnimationLoop((now) => {
   world.setDaylight(day)
   viewmodel.setDaylight(day)
   audio.setNight(day < 0.5)
-  hearUfo(ufo.update(time, day < 0.5, active, player.state))
+  followUfo(ufo.update(time, day < 0.5, active, player.state))
   if (finishedAt === null && grass.standing === 0) finish()
   if (finishedAt !== null && !certificateHinted && showAt !== null && time - showAt > DUSK_SECONDS + SHOW_SECONDS) {
     certificateHinted = true
