@@ -61,11 +61,11 @@ const GROW_TICK = 0.25
 const ALIEN_SECONDS = 5
 /**
  * Regrowth tries per second. Each picks a random blade and one of its neighbours, and sprouts the
- * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 3 minutes
- * on average; the edge of a mown patch creeps in a row every 7 minutes or so. Cleared ground with no
+ * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 9 minutes
+ * on average; the edge of a mown patch creeps in a row every 20 minutes or so. Cleared ground with no
  * grass next to it never does, unless a cow fertilises it.
  */
-const REGROWTH_TRIES = 6000
+const REGROWTH_TRIES = 2000
 /** Stubs fade out between these distances, inside the nearest detail level. Further out the ground paints the cut look. */
 const STUB_FADE = [5, 8] as const
 

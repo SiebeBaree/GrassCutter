@@ -35,7 +35,7 @@ Every blade you cut pays one bCoin. Spend them at the farm shop next to where yo
 
 He also sells up to three robots (8,000, 50,000 and 150,000). Each one finds grass on its own and cuts it at half your pace with whatever tool you buy it. They start with a nail clipper and climb the same ladder as you, a little cheaper.
 
-Grass grows back while you play. A blade snipped out of tall grass is back in about three minutes, and the edge of a mown patch creeps in a row every seven or so. Ground with no grass next to it stays clear, so the meadow can be finished.
+Grass grows back while you play. A blade snipped out of tall grass is back in about nine minutes, and the edge of a mown patch creeps in a row every twenty or so. Ground with no grass next to it stays clear, so the meadow can be finished.
 
 Two cows graze the meadow. Each eats about fifteen blades a minute, and every few minutes one of them leaves a pat. All the cut grass within two metres of it sprouts again, with a sunflower in the middle. Cows are solid, so walk or drive around them.
 
