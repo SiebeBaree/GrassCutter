@@ -238,7 +238,7 @@ function equip(next: Tier) {
   placeMachines(false)
   if (id === 'trimmer') {
     Object.assign(trim, { ahead: 1.4, spin: 0 })
-    placeTrimmer()
+    placeTrimmer(Infinity)
   }
   hud.setCrosshair(id !== 'mower' && id !== 'rider')
   clickQueued = false
@@ -267,14 +267,22 @@ const forward = new Vector3()
 const pick: Pick = { blade: -1, s: 0 }
 let flowerTarget: Flower | null = null
 const scissorsAt = { x: 0, z: 0, active: false }
-/** The trimmer head on the ground, how far ahead of you it is and how fast its line spins (0 to 1). */
-const trim = { x: 0, z: 0, ahead: 1.4, spin: 0 }
+/**
+ * The trimmer head on the ground: how far ahead of you it is, which way from you it points (a yaw) and how
+ * fast its line spins (0 to 1).
+ */
+const trim = { x: 0, z: 0, ahead: 1.4, heading: 0, spin: 0 }
 
-/** Puts the trimmer head `trim.ahead` metres in front of you. */
-function placeTrimmer() {
+/**
+ * Puts the trimmer head `trim.ahead` metres from you, swung up to `turn` radians toward where you look.
+ * It always moves with you; only the swing is limited.
+ */
+function placeTrimmer(turn: number) {
   const { x, z, yaw } = player.state
-  trim.x = x - Math.sin(yaw) * trim.ahead
-  trim.z = z - Math.cos(yaw) * trim.ahead
+  const behind = Math.atan2(Math.sin(yaw - trim.heading), Math.cos(yaw - trim.heading))
+  trim.heading += Math.max(-turn, Math.min(turn, behind))
+  trim.x = x - Math.sin(trim.heading) * trim.ahead
+  trim.z = z - Math.cos(trim.heading) * trim.ahead
 }
 
 function aim() {
@@ -356,11 +364,11 @@ function runMachines(dt: number) {
   const me = player.state
   let cut = 0
   if (id === 'trimmer') {
-    // The head sits straight ahead, where the crosshair meets the ground, within reach of the handle.
-    // Only that distance eases; turning and walking carry the head with you.
+    // The head aims for where the crosshair meets the ground, within reach of the handle. Walking carries
+    // it with you; turning swings it after your view no faster than TRIMMER.sweep.
     const want = ray.dy < 0 ? Math.hypot(ray.dx, ray.dz) * (-ray.oy / ray.dy) : TRIMMER.far
     trim.ahead += (Math.max(TRIMMER.near, Math.min(TRIMMER.far, want)) - trim.ahead) * Math.min(1, dt * TRIMMER.follow)
-    placeTrimmer()
+    placeTrimmer((TRIMMER.sweep * dt) / trim.ahead)
     trim.spin = Math.max(0, Math.min(1, trim.spin + (mouseHeld ? dt * 6 : -dt * 2)))
     if (trim.spin > 0.6) {
       cut = cutting.circle(trim.x, trim.z, TRIMMER.radius, 'trimmer', me, time, 'you')
@@ -713,7 +721,7 @@ renderer.setAnimationLoop((now) => {
     const { x, z, yaw } = player.state
     hands.set(x - Math.sin(yaw) * 0.32 + Math.cos(yaw) * 0.24, 0.98, z - Math.cos(yaw) * 0.32 - Math.sin(yaw) * 0.24)
     if (!working) trim.spin = Math.max(0, trim.spin - dt * 2)
-    placeTrimmer()
+    placeTrimmer(working ? 0 : Infinity)
     trimmer.update(trim.x, trim.z, hands, time, dt, trim.spin)
   }
   const engine = id === 'mower' || id === 'rider' || id === 'trimmer' ? id : null
