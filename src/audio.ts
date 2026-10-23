@@ -526,17 +526,6 @@ export function createAudio() {
       osc.start(t)
       osc.stop(t + 0.1)
     },
-    /** Metal on stone: a tool hitting a rock. */
-    clank(at = HERE) {
-      const live = running()
-      if (!live) return
-      const { ac } = live
-      const out = placed(ac, live.out, at)
-      const t = ac.currentTime
-      noiseBurst(ac, out, t, 0.09, 'bandpass', 2600, 1.4, 0.7)
-      noiseBurst(ac, out, t, 0.25, 'lowpass', 380, 1, 0.5)
-      for (const [hz, volume] of [[1480, 0.09], [2210, 0.06], [3390, 0.04]] as const) ping(ac, out, t, hz, volume, 0.45, 'triangle')
-    },
     /** A robot's happy beep-boop. */
     beep(at = HERE) {
       const live = running()

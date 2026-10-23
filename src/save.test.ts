@@ -17,14 +17,13 @@ function sampleSave(): Save {
     earned: 5678,
     tier: 3,
     tool: 2,
-    robots: [{ tier: 1, x: 3, z: 4, yaw: 0.5, broken: true }],
+    robots: [{ tier: 1, x: 3, z: 4, yaw: 0.5 }],
     sunflowers: [{ x: 10, z: -20 }],
     player: { x: 1.5, z: -2.25, yaw: 0.5, pitch: -0.2 },
     playSeconds: 93.5,
     finishedAt: null,
     cows: [{ x: -8, z: 70, yaw: 1 }],
     alien: [12, 500],
-    broken: [2],
   }
 }
 
@@ -63,11 +62,10 @@ describe('save', () => {
   })
 
   it('opens saves from before the cows, with all their progress', () => {
-    const bytes = withHeader(encodeSave(sampleSave(), cellBlade), ({ cows: _, alien: __, broken: ___, ...json }) => json)
+    const bytes = withHeader(encodeSave(sampleSave(), cellBlade), ({ cows: _, alien: __, ...json }) => json)
     const loaded = decodeSave(bytes, cellBlade)
     expect(loaded?.cows).toEqual([])
     expect(loaded?.alien).toEqual([])
-    expect(loaded?.broken).toEqual([])
     expect(loaded?.coins).toBe(1234)
     expect(loaded?.growth[7]).toBe(0)
   })

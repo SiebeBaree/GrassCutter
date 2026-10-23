@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { RobotSave } from './economy'
 import { BLADE_COUNT, type Growth } from './field'
 import { SPAWN } from './layout'
-import { MAX_ROBOTS, TIERS, type Tier } from './tools'
+import { MAX_ROBOTS, type Tier } from './tools'
 import { browserFingerprint, deriveKey, installSalt, seal, unseal } from './vault'
 
 // Progress lives in localStorage, sealed by vault.ts. Inside is a small JSON header (coins, tools, robots,
@@ -26,7 +26,6 @@ const OLD_KEYS = ['grass-cutter/save']
 const MAX_SUNFLOWERS = 40
 const MAX_COWS = 8
 const MAX_ALIEN = 20_000
-const TIER_COUNT = TIERS.length
 
 const PlayerSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number(), pitch: z.number() })
 const SpotSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number() })
@@ -36,7 +35,7 @@ const HeaderSchema = z.object({
   version: z.literal(SAVE_VERSION),
   coins: z.number().int().nonnegative(),
   tier: TierSchema,
-  robots: z.array(z.object({ tier: TierSchema, x: z.number(), z: z.number(), yaw: z.number(), broken: z.boolean().optional() })).max(MAX_ROBOTS),
+  robots: z.array(z.object({ tier: TierSchema, x: z.number(), z: z.number(), yaw: z.number() })).max(MAX_ROBOTS),
   // A broken position, timer or flower shouldn't cost anyone their progress.
   earned: z.number().nonnegative().catch(0),
   tool: TierSchema.catch(0),
@@ -49,8 +48,6 @@ const HeaderSchema = z.object({
   cows: z.array(SpotSchema).max(MAX_COWS).catch([]),
   /** Added in 3.1. Purple blades a UFO left standing, by blade index. */
   alien: z.array(z.number().int().min(0).max(BLADE_COUNT - 1)).max(MAX_ALIEN).catch([]),
-  /** Added in 3.2. Your tools that hit a rock and wait for the farmer, by tier. */
-  broken: z.array(TierSchema).max(TIER_COUNT).catch([]),
 })
 
 export type PlayerState = z.infer<typeof PlayerSchema>
@@ -73,8 +70,6 @@ export type Save = {
   cows: CowSave[]
   /** Blades a UFO turned purple that are still standing. */
   alien: number[]
-  /** Your tools that hit a rock, by tier. */
-  broken: Tier[]
 }
 
 const finite = (...values: number[]) => values.every(Number.isFinite)
@@ -96,7 +91,6 @@ export function encodeSave(save: Save, cellBlade: Int32Array) {
       finishedAt: save.finishedAt,
       cows: save.cows.filter((c) => finite(c.x, c.z, c.yaw)).slice(0, MAX_COWS),
       alien: save.alien.filter((i) => save.growth[i] > 0).slice(0, MAX_ALIEN),
-      broken: [...new Set(save.broken)].filter((t) => t <= save.tier),
     } satisfies z.input<typeof HeaderSchema>),
   )
   const bytes = new Uint8Array(4 + header.length + BLADE_COUNT / 8)
@@ -134,8 +128,8 @@ export function decodeSave(bytes: Uint8Array, cellBlade: Int32Array): Save | nul
     growth[i] = (bits[k >> 3] >> (k & 7)) & 1 ? 255 : 0
     k++
   }
-  const { version: _, tool, tier, alien, broken, ...rest } = parsed.data
-  return { ...rest, growth, tier, tool: tool <= tier ? tool : tier, alien: alien.filter((i) => growth[i] > 0), broken: broken.filter((t) => t <= tier) }
+  const { version: _, tool, tier, alien, ...rest } = parsed.data
+  return { ...rest, growth, tier, tool: tool <= tier ? tool : tier, alien: alien.filter((i) => growth[i] > 0) }
 }
 
 let key: Promise<CryptoKey> | null = null

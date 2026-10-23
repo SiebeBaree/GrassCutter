@@ -3,8 +3,7 @@ import { MAX_ROBOTS, ROBOT_PRICES, TIERS, TOOLS, type Tier } from './tools'
 // What you own and what the farmer will sell you next. The robots module reads `robots` and moves
 // them around in place, so this is the one copy of their state.
 
-/** A robot. `broken` once it hits a rock, until you fix it. */
-export type RobotSave = { tier: Tier; x: number; z: number; yaw: number; broken?: boolean }
+export type RobotSave = { tier: Tier; x: number; z: number; yaw: number }
 
 export type Holdings = {
   coins: number

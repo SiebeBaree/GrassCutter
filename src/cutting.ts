@@ -1,12 +1,10 @@
 import { bladeLean, forEachStandingNear, type Field, type Growth, type Vec2 } from './field'
 import type { Grass } from './grass'
-import { rockInCircle, rockInWedge, rockUnderDeck, type Rock } from './rocks'
 import type { Flower, Sunflowers } from './sunflowers'
 import { harvests, type ToolId } from './tools'
 
 // How each tool takes grass and sunflowers, shared by you and the robots. Every function returns what
-// the blades it cut are worth in bCoins: one each, more for a UFO's purple ones. The caller pays. A cut
-// that would touch a rock takes nothing and reports the hit instead; the tool that made it is broken.
+// the blades it cut are worth in bCoins: one each, more for a UFO's purple ones. The caller pays.
 
 /** Who did the cutting: you, or robot 0, 1 or 2. */
 export type Cutter = 'you' | number
@@ -14,8 +12,6 @@ export type Cutter = 'you' | number
 type Hooks = {
   /** A flower came down. `harvested` if the tool was gentle enough to pay for it. */
   onFlower: (flower: Flower, harvested: boolean, by: Cutter) => void
-  /** A tool hit a rock. */
-  onRock: (rock: Rock, tool: ToolId, by: Cutter) => void
 }
 
 export function createCutting(field: Field, growth: Growth, grass: Grass, sunflowers: Sunflowers, hooks: Hooks) {
@@ -32,12 +28,6 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
   }
 
   /** Takes every standing flower in `flowers`: a harvest with the clipper or scissors, a loss with anything else. */
-  /** Reports a hit and returns true if `rock` is one. */
-  function hit(rock: Rock | null, tool: ToolId, by: Cutter) {
-    if (rock) hooks.onRock(rock, tool, by)
-    return rock !== null
-  }
-
   function flowersDown(flowers: Flower[], tool: ToolId, from: Vec2, time: number, by: Cutter) {
     for (const f of flowers) if (sunflowers.cut(f, time, from.x, from.z)) hooks.onFlower(f, harvests(tool), by)
   }
@@ -53,7 +43,6 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
     },
     /** Every blade rooted within r of (x, z), toppling away from `from`. Scissors and the trimmer. */
     circle(x: number, z: number, r: number, tool: ToolId, from: Vec2, time: number, by: Cutter) {
-      if (hit(rockInCircle(x, z, r), tool, by)) return 0
       near.length = 0
       forEachStandingNear(field, growth, x, z, r, collect)
       let cut = 0
@@ -75,7 +64,6 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
         const angle = Math.atan2(dx * -fz + dz * fx, dx * fx + dz * fz)
         return angle >= from && angle <= to
       }
-      if (hit(rockInWedge(at, reach, from, to), 'sickle', by)) return 0
       near.length = 0
       forEachStandingNear(field, growth, at.x, at.z, reach, collect)
       let cut = 0
@@ -102,7 +90,6 @@ export function createCutting(field: Field, growth: Growth, grass: Grass, sunflo
         const dz = z - centre.z
         return Math.abs(dx * f.x + dz * f.z) <= halfLength && Math.abs(dx * f.z - dz * f.x) <= halfWidth
       }
-      if (hit(rockUnderDeck(centre, f, halfLength, halfWidth), tool, by)) return 0
       const r = Math.hypot(halfLength, halfWidth)
       near.length = 0
       forEachStandingNear(field, growth, centre.x, centre.z, r, collect)

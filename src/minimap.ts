@@ -2,7 +2,6 @@ import { MAP_HALF, type Vec2 } from './field'
 import { DENSITY_CELLS } from './grass'
 import { FARMER } from './layout'
 import { ROBOT_COLORS } from './robots'
-import { ROCKS } from './rocks'
 import type { PlayerState } from './save'
 
 const SIZE = 176
@@ -15,8 +14,8 @@ const MINI = DENSITY_CELLS / 2
 const MARK_BELOW = 400
 
 /**
- * Top-down map of the meadow in the corner: standing grass, cut ground, rocks, sunflowers, robots, the
- * stall and an arrow for you. A broken robot gets a red ring. North is up. Keeps its own image up to date blade by blade through cellChanged().
+ * Top-down map of the meadow in the corner: standing grass, cut ground, sunflowers, robots, the stall
+ * and an arrow for you. North is up. Keeps its own image up to date blade by blade through cellChanged().
  */
 export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncutPerCell: Uint8Array) {
   const canvas = document.createElement('canvas')
@@ -89,7 +88,7 @@ export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncu
       dirty = true
     },
     /** Redraws a few times a second. `flowers` is only asked for on a redraw. */
-    update(time: number, player: PlayerState, remaining: number, flowers: () => readonly Vec2[], robots: readonly (Vec2 & { broken?: boolean })[]) {
+    update(time: number, player: PlayerState, remaining: number, flowers: () => readonly Vec2[], robots: readonly Vec2[]) {
       if (!ctx || !cellsCtx || !image || canvas.hidden || time - drawnAt < REDRAW_SECONDS) return
       drawnAt = time
       if (dirty) {
@@ -117,15 +116,9 @@ export function createMinimap(root: HTMLElement, bladesPerCell: Uint8Array, uncu
           dot({ x: ((m % MINI) + 0.5) * cellMetres - MAP_HALF, z: (Math.floor(m / MINI) + 0.5) * cellMetres - MAP_HALF }, 2.4, '#ffffff')
         }
       }
-      for (const rock of ROCKS) dot(rock, 2.2, '#a9a59b')
       for (const f of flowers()) dot(f, 2.6, '#ffd23a')
       dot(FARMER, 3.2, '#c8352b')
-      robots.forEach((r, k) => {
-        if (!r.broken) return dot(r, 3, ROBOT_COLORS[k])
-        ctx.strokeStyle = '#ff3b2a'
-        dot(r, 4, ROBOT_COLORS[k])
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)'
-      })
+      robots.forEach((r, k) => dot(r, 3, ROBOT_COLORS[k]))
 
       // You: an arrow pointing where you look.
       ctx.translate(c + player.x * scale, c + player.z * scale)

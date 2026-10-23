@@ -4,7 +4,6 @@ import { bake } from './bake'
 import { CHUNK, CHUNKS, forEachStandingNear, inMeadow, MAP_HALF, type Field, type Growth, type Vec2 } from './field'
 import type { Grass } from './grass'
 import { SPAWN } from './layout'
-import { pushOutOfRocks } from './rocks'
 import type { CowSave } from './save'
 import type { Sunflowers } from './sunflowers'
 
@@ -309,7 +308,7 @@ export function createCows(field: Field, growth: Growth, grass: Grass, sunflower
     }
   }
 
-  /** Cows step apart rather than through each other, walk around rocks and stay in the meadow. */
+  /** Cows step apart rather than through each other, and stay in the meadow. */
   function separate() {
     for (const a of cows) {
       for (const b of cows) {
@@ -322,7 +321,6 @@ export function createCows(field: Field, growth: Growth, grass: Grass, sunflower
           a.state.z += (dz / d) * (1.8 - d) * 0.5
         }
       }
-      pushOutOfRocks(a.state, 0.8)
       if (!inMeadow(field, a.state.x, a.state.z, 1)) {
         const r = Math.hypot(a.state.x, a.state.z)
         a.state.x *= 1 - 0.5 / r

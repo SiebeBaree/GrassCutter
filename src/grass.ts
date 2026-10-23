@@ -353,10 +353,8 @@ type Chunk = {
  * Standing blades in chunks with distance-based detail, regrowth, falling and fallen clippings, and the
  * density texture that lets the soil brighten and show mowing stripes as the meadow thins out.
  * This module owns writes to `growth`. `onDensity` hears about every density texel whose count changes.
- * Blades marked in `buried` sit under a rock: they start cut and never grow back.
  */
-export function createGrass(field: Field, growth: Growth, noise: Texture, onDensity: (d: number) => void, buried: Uint8Array) {
-  for (let i = 0; i < BLADE_COUNT; i++) if (buried[i]) growth[i] = 0
+export function createGrass(field: Field, growth: Growth, noise: Texture, onDensity: (d: number) => void) {
   // Purple blades from UFO beams, the ones still turning, and every one still standing so the save can list them.
   const alien: Alien = new Uint8Array(BLADE_COUNT)
   const alienRising: number[] = []
@@ -515,7 +513,6 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
 
   /** Brings cut blade i back as a sprout. */
   const sprout = (i: number) => {
-    if (buried[i]) return
     growth[i] = 1
     standingTotal++
     chunkStanding[touch(i).k]++
@@ -701,7 +698,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
         for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
           const i = field.cellBlade[cz * CELLS + cx]
-          if (i < 0 || buried[i] || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
+          if (i < 0 || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
           if (growth[i] === 0) sprout(i)
           growth[i] = 255
           touch(i)
@@ -744,7 +741,7 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
       for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
         for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
           const i = field.cellBlade[cz * CELLS + cx]
-          if (i < 0 || buried[i] || growth[i] !== 0 || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
+          if (i < 0 || growth[i] !== 0 || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
           sprout(i)
           count++
         }

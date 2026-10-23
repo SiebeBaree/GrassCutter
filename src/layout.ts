@@ -1,5 +1,4 @@
 import { meadowEdge, type Vec2 } from './field'
-import { pushOutOfRocks } from './rocks'
 
 // Where the fixed things stand, just off the south edge of the meadow, and how you bump into them.
 
@@ -41,7 +40,7 @@ export const OBSTACLES: Box[] = [
   stallBox(-2.55, 0.75, 0.42, 0.55),
 ]
 
-/** Pushes a body of `radius` at p out of every obstacle and rock. */
+/** Pushes a body of `radius` at p out of every obstacle. */
 export function pushOut(p: Vec2, radius: number) {
   for (const box of OBSTACLES) {
     const c = Math.cos(box.yaw)
@@ -70,5 +69,4 @@ export function pushOut(p: Vec2, radius: number) {
     p.x = box.x + fx * c + fz * s
     p.z = box.z - fx * s + fz * c
   }
-  pushOutOfRocks(p, radius)
 }
