@@ -1,4 +1,4 @@
-import { CapsuleGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, SphereGeometry, Vector3 } from 'three'
+import { AdditiveBlending, CapsuleGeometry, Color, CylinderGeometry, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, SphereGeometry, Vector3 } from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import { bake } from './bake'
 import type { Cutter, Cutting } from './cutting'
@@ -8,6 +8,7 @@ import type { Grass } from './grass'
 import { onStall, pushOut, ROBOT_DOOR } from './layout'
 import { createMower, wheel } from './mower'
 import { createRider } from './rider'
+import { bladesNearRocks, nearestRock, pushOutOfRocks, type Rock } from './rocks'
 import type { Flower, Sunflowers } from './sunflowers'
 import { CLIPPER, harvests, MOWER, RIDER, ROBOT_PACE, SCISSORS, SICKLE, TOOLS, TRIMMER, type ToolId } from './tools'
 import { createTrimmer } from './trimmer'
@@ -15,7 +16,8 @@ import { createHandTool, type HandTool } from './viewmodel'
 
 // The robots: up to three helpers that find grass on their own and cut it at half your pace with
 // whatever tool you bought them. Their state lives in the save (RobotSave); this module moves them
-// around, picks their work and draws them.
+// around, picks their work and draws them. They leave the grass around rocks to you, but one driving
+// across the meadow can still run into a rock. It then sits there broken until you shine your light on it.
 
 /** Accent colour of each robot, also used for its dot on the minimap. */
 export const ROBOT_COLORS = ['#ff8a3d', '#2ec4b6', '#a77bff'] as const
@@ -24,6 +26,7 @@ const shell = new MeshStandardMaterial({ color: '#e8ecf1', roughness: 0.35, meta
 const joint = new MeshStandardMaterial({ color: '#3b4048', roughness: 0.5, metalness: 0.6 })
 const visor = new MeshStandardMaterial({ color: '#0f1216', roughness: 0.15, metalness: 0.6 })
 const eyeLight = new MeshStandardMaterial({ color: '#7ff6ff', emissive: '#59f0ff', emissiveIntensity: 1.8 })
+const BROKEN = new Color('#ff2a1a')
 
 /**
  * How each tool works in a robot's hands. Robots never tire or wander, so their speeds and swings are
@@ -49,6 +52,8 @@ const FLOWER_RANGE = 40
 /** How far around itself a robot looks for grass before searching the whole meadow. */
 const LOCAL_SEARCH = 3.5
 const SPACING = 1.3
+/** Robots leave blades this close to a rock to you, so their tools stay clear of it while they cut. */
+const ROCK_BERTH = 1.8
 /** How the robots bend the grass: around them, or around their mower deck. */
 const PUSH = { body: [0.7, 0.3], mower: [1.0, 0.5], rider: [1.4, 0.55] } as const
 const HAND_SCALE: Record<ToolId, number> = { clipper: 2.2, scissors: 1.8, sickle: 1.45, trimmer: 1, mower: 1, rider: 1 }
@@ -139,7 +144,7 @@ export function buildRobot(color: string) {
   const group = new Group()
   group.add(drive, torso)
   group.scale.setScalar(ROBOT_SCALE)
-  return { group, drive, torso, head, eyes, wheels, arms }
+  return { group, drive, torso, head, eyes, wheels, arms, glow, color: new Color(color) }
 }
 
 type Model = ReturnType<typeof buildRobot>
@@ -183,12 +188,21 @@ type Hooks = {
   onCut: (worth: number, by: Cutter) => void
   /** A sound the robot made at (x, z). */
   onSound: (kind: 'snip' | 'shear' | 'swoosh' | 'beep', x: number, z: number) => void
+  /** A robot drove its machine into a rock. */
+  onRock: (rock: Rock, tool: ToolId, by: number) => void
   /** Engine noise from robot machines: the nearest running one and how far it is. */
   onEngines: (kind: 'trimmer' | 'mower' | 'rider' | null, distance: number) => void
 }
 
 export function createRobots(field: Field, growth: Growth, grass: Grass, sunflowers: Sunflowers, cutting: Cutting, robots: RobotSave[], hooks: Hooks) {
   const group = new Group()
+  const avoid = bladesNearRocks(field, ROCK_BERTH)
+  // Your repair light: a cone from your hand to the robot you're fixing.
+  const beamMaterial = new MeshBasicMaterial({ color: '#fff1b8', transparent: true, opacity: 0.3, blending: AdditiveBlending, depthWrite: false })
+  const beam = new Mesh(new CylinderGeometry(0.4, 0.03, 1, 20, 1, true).translate(0, 0.5, 0).rotateX(Math.PI / 2), beamMaterial)
+  beam.visible = false
+  group.add(beam)
+  const beamTo = new Vector3()
   const list: Robot[] = []
   const hands = new Vector3()
 
@@ -281,7 +295,7 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
         const x = r.state.x + (Math.random() * 2 - 1) * 12
         const z = r.state.z + (Math.random() * 2 - 1) * 12
         let found = -1
-        forEachStandingNear(field, growth, x, z, 1, (i) => (found = i))
+        forEachStandingNear(field, growth, x, z, 1, (i) => !avoid[i] && (found = i))
         if (found >= 0 && Math.hypot(x - r.state.x, z - r.state.z) > 3) {
           r.target = { kind: 'blade', i: found, x: field.x[found], z: field.z[found] }
           return
@@ -306,6 +320,7 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
     let best = -1
     let bestScore = Infinity
     forEachStandingNear(field, growth, at.x, at.z, LOCAL_SEARCH, (i) => {
+      if (avoid[i]) return
       const dx = field.x[i] - at.x
       const dz = field.z[i] - at.z
       const d = Math.hypot(dx, dz)
@@ -318,32 +333,27 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
     })
 
     if (best < 0) {
-      // Nothing close: head for the nearest chunk with grass that no other robot has claimed.
-      let bestChunk = -1
-      let bestFree = false
-      let bestDistance = Infinity
+      // Nothing close: head for the nearest chunk with grass to cut, preferring ones no other robot has claimed.
+      const chunks: { k: number; free: boolean; d: number }[] = []
       for (let k = 0; k < CHUNKS * CHUNKS; k++) {
         if (grass.chunkStanding[k] === 0) continue
         const cx = ((k % CHUNKS) + 0.5) * CHUNK - MAP_HALF
         const cz = (Math.floor(k / CHUNKS) + 0.5) * CHUNK - MAP_HALF
-        const d = Math.hypot(cx - at.x, cz - at.z)
-        const free = !claimed(r, k)
-        if ((free && !bestFree) || (free === bestFree && d < bestDistance)) {
-          bestChunk = k
-          bestFree = free
-          bestDistance = d
-        }
+        chunks.push({ k, free: !claimed(r, k), d: Math.hypot(cx - at.x, cz - at.z) })
       }
-      if (bestChunk >= 0) {
+      chunks.sort((a, b) => Number(b.free) - Number(a.free) || a.d - b.d)
+      // A chunk whose only grass hugs a rock has nothing for a robot, so try the next.
+      for (const { k } of chunks) {
         let bestD = Infinity
-        for (let i = field.chunkStart[bestChunk]; i < field.chunkStart[bestChunk + 1]; i++) {
-          if (growth[i] === 0) continue
+        for (let i = field.chunkStart[k]; i < field.chunkStart[k + 1]; i++) {
+          if (growth[i] === 0 || avoid[i]) continue
           const d = Math.hypot(field.x[i] - at.x, field.z[i] - at.z)
           if (d < bestD) {
             bestD = d
             best = i
           }
         }
+        if (best >= 0) break
       }
     }
 
@@ -387,7 +397,8 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
   function work(r: Robot, time: number, dt: number) {
     const tool = toolOf(r)
     if (!r.target || !stillThere(r.target)) retarget(r, time)
-    else if (r.target.kind !== 'rest' && time - r.targetSince > PATIENCE) retarget(r, time, true)
+    // A resting robot looks for work again now and then: grass grows back.
+    else if (time - r.targetSince > PATIENCE) retarget(r, time, r.target.kind !== 'rest')
     const t = r.target
     if (!t) return
     const s = r.state
@@ -472,6 +483,10 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
           s.z += (dz / d) * (min - d) * 0.5
         }
       }
+      // A machine that rams a rock breaks; the riding mower's deck is too far under it to touch one first.
+      const rock = pushOutOfRocks(s, room)
+      const tool = toolOf(r)
+      if (rock && isMachine(tool) && !s.broken) hooks.onRock(rock, tool, r.index)
       const px = s.x - player.x
       const pz = s.z - player.z
       const pd = Math.hypot(px, pz)
@@ -493,27 +508,39 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
     const { model, state: s } = r
     const tool = toolOf(r)
     const f = forward(s.yaw)
+    const broken = s.broken === true
+    // A broken robot's antenna blinks red.
+    model.glow.emissive.copy(broken ? BROKEN : model.color)
+    model.glow.emissiveIntensity = broken && Math.sin(time * 5) < 0 ? 0.2 : 1.4
 
     // Blink every few seconds.
     if (time > r.blinkAt + 0.13) r.blinkAt = time + 2.5 + ((r.index * 1.7 + time) % 3)
-    model.eyes.scale.y = time > r.blinkAt ? 0.15 : celebrating ? 0.6 : 1
+    model.eyes.scale.y = broken || time > r.blinkAt ? 0.15 : celebrating ? 0.6 : 1
     for (const w of model.wheels) w.rotation.x -= (r.speed * dt) / (0.13 * ROBOT_SCALE)
     // Look toward the work.
     const t = r.target
     let look = 0
-    if (t && !celebrating) {
+    if (t && !celebrating && !broken) {
       const dx = t.x - s.x
       const dz = t.z - s.z
       look = Math.atan2(-dx, -dz) - s.yaw
       look = Math.max(-0.8, Math.min(0.8, Math.atan2(Math.sin(look), Math.cos(look))))
     }
     model.head.rotation.y += (look - model.head.rotation.y) * Math.min(1, dt * 5)
-    model.head.rotation.x = tool === 'mower' || tool === 'rider' ? 0 : -0.25
+    model.head.rotation.x = broken ? -0.6 : tool === 'mower' || tool === 'rider' ? 0 : -0.25
 
     const [left, right] = model.arms
     const use = Math.min(1, (time - r.usedAt) / 0.35)
     const chop = Math.sin(Math.PI * use)
-    if (celebrating) {
+    if (broken) {
+      // Slumped, arms hanging.
+      for (const [k, arm] of model.arms.entries()) {
+        arm.shoulder.rotation.set(0.05, 0, k ? -0.08 : 0.08)
+        arm.elbow.rotation.x = 0.1
+      }
+      model.group.position.y = 0
+      model.torso.rotation.y = 0
+    } else if (celebrating) {
       // Arms up, a little dance.
       for (const [k, arm] of model.arms.entries()) {
         arm.shoulder.rotation.set(Math.PI * 0.95, 0, (k ? -1 : 1) * (0.35 + Math.sin(time * 6 + k) * 0.2))
@@ -547,13 +574,13 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
     } else if (kit?.kind === 'trimmer') {
       hands.set(s.x + f.x * 0.5 - f.z * 0.14, 0.75 + model.group.position.y, s.z + f.z * 0.5 + f.x * 0.14)
       const head = kit.trimmer.head
-      const working = t?.kind === 'blade' && !celebrating
+      const working = t?.kind === 'blade' && !celebrating && !broken
       if (!working) head.set(s.x + f.x * 1.0, 0, s.z + f.z * 1.0)
       kit.trimmer.update(head.x, head.z, hands, time, dt, working ? 1 : 0)
     } else if (kit?.kind === 'mower') {
-      kit.mower.update(s, time, t?.kind === 'blade' && !celebrating)
+      kit.mower.update(s, time, t?.kind === 'blade' && !celebrating && !broken)
     } else if (kit?.kind === 'rider') {
-      kit.rider.update(s, time, t?.kind === 'blade' && !celebrating, 0)
+      kit.rider.update(s, time, t?.kind === 'blade' && !celebrating && !broken, 0)
     }
     if (kit?.kind !== 'rider') {
       model.group.position.x = s.x
@@ -585,7 +612,7 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
       const elapsed = time - lastUpdate
       lastUpdate = time
       for (const r of list) {
-        if (active && working) work(r, time, dt)
+        if (active && working && !r.state.broken) work(r, time, dt)
         else {
           r.speed *= 0.9
           // Paused: hold their patience and swing timers where they were.
@@ -594,7 +621,7 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
         }
         animate(r, time, dt, !working)
         const tool = toolOf(r)
-        if (active && working && r.target?.kind === 'blade' && (tool === 'trimmer' || tool === 'mower' || tool === 'rider')) {
+        if (active && working && !r.state.broken && r.target?.kind === 'blade' && (tool === 'trimmer' || tool === 'mower' || tool === 'rider')) {
           const distance = Math.hypot(r.state.x - listener.x, r.state.z - listener.z)
           if (!engine || distance < engine.distance) engine = { kind: tool, distance }
         }
@@ -616,6 +643,40 @@ export function createRobots(field: Field, growth: Growth, grass: Grass, sunflow
         if (machine) reachPoint(r, at)
         grass.pushers.set([machine ? at.x : r.state.x, machine ? at.z : r.state.z, radius, strength], p)
       }
+    },
+    /** The nearest broken robot within `reach` of p, or -1. */
+    brokenNear(p: Vec2, reach: number) {
+      let best = -1
+      let bestD = reach
+      for (const r of list) {
+        const d = Math.hypot(r.state.x - p.x, r.state.z - p.z)
+        if (r.state.broken && d < bestD) {
+          best = r.index
+          bestD = d
+        }
+      }
+      return best
+    },
+    /** Shines your repair light from `from` onto robot k. Pass -1 to turn it off. */
+    shine(k: number, from: Vector3, time: number) {
+      const r = list[k]
+      beam.visible = r !== undefined
+      if (!r) return
+      beamTo.set(r.state.x, 0.75 * ROBOT_SCALE, r.state.z)
+      beam.position.copy(from)
+      beam.lookAt(beamTo)
+      beam.scale.set(1, 1, from.distanceTo(beamTo))
+      beamMaterial.opacity = 0.26 + 0.06 * Math.sin(time * 23)
+    },
+    /** Robot k works again. It turns its back on the rock it hit so it doesn't drive straight back in. */
+    fix(k: number) {
+      const r = list[k]
+      if (!r) return
+      r.state.broken = false
+      const rock = nearestRock(r.state.x, r.state.z)
+      r.state.yaw = Math.atan2(-(r.state.x - rock.x), -(r.state.z - rock.z))
+      r.target = null
+      r.speed = 0
     },
     /** Puts every robot back on the meadow's edge if a save left one somewhere odd. */
     tidy() {

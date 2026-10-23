@@ -1,11 +1,12 @@
 import { priceOf, type Holdings, type Purchase } from './economy'
 import { ROBOT_COLORS } from './robots'
-import { MAX_ROBOTS, ROBOT_PRICES, TOOLS, type Tier } from './tools'
+import { MAX_ROBOTS, ROBOT_PRICES, TIERS, TOOLS, type Tier } from './tools'
 
 const fmt = new Intl.NumberFormat('en-US')
 const NAME_KEY = 'grass-cutter/name'
 
-export type MenuKind = 'welcome' | 'continue' | 'paused' | 'finished' | 'busy'
+/** `away` is the pause after a few minutes without input. */
+export type MenuKind = 'welcome' | 'continue' | 'paused' | 'away' | 'finished' | 'busy'
 
 /** What the menu reports about your progress. */
 export type Progress = { share: number; coins: number; minutes: number }
@@ -87,7 +88,8 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   status.append(toolName, meter, hotbar)
 
   const prompt = el('div', 'prompt')
-  prompt.append(el('kbd', '', 'E'), el('span', '', 'Shop'))
+  const promptLabel = el('span', '')
+  prompt.append(el('kbd', '', 'E'), promptLabel)
   prompt.hidden = true
 
   const bubble = el('div', 'bubble')
@@ -147,8 +149,7 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   let toastTimer = 0
   let shownCoins = -1
   let shownShare = ''
-  let shownTool = -1
-  let shownTier = -1
+  let shownTools = ''
   let icons: Icons | null = null
   let shopKey = ''
   /** The rows rebuild after a purchase, so a double click would land on the next thing for sale. */
@@ -267,7 +268,7 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
       shopKey = ''
     },
     /** Wallet, meadow progress and hotbar. Cheap to call every frame; only touches the DOM on change. */
-    update(coins: number, cutShare: number, tier: Tier, tool: Tier) {
+    update(coins: number, cutShare: number, tier: Tier, tool: Tier, broken: ReadonlySet<Tier>) {
       const whole = Math.floor(coins)
       if (whole !== shownCoins) {
         shownCoins = whole
@@ -279,13 +280,14 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
         share.textContent = `${text} cut`
         fill.style.transform = `scaleX(${cutShare})`
       }
-      if (tool !== shownTool || tier !== shownTier) {
-        shownTool = tool
-        shownTier = tier
-        toolName.textContent = TOOLS[tool].name
+      const tools = `${tool}|${tier}|${[...broken].join()}`
+      if (tools !== shownTools) {
+        shownTools = tools
+        toolName.textContent = broken.has(tool) ? `${TOOLS[tool].name} (broken)` : TOOLS[tool].name
         slots.forEach(({ slot }, k) => {
           slot.classList.toggle('owned', k <= tier)
           slot.classList.toggle('selected', k === tool)
+          slot.classList.toggle('broken', broken.has(TIERS[k]))
         })
       }
     },
@@ -298,8 +300,10 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
     setCrosshair(visible: boolean) {
       crosshair.hidden = !visible
     },
-    setPrompt(visible: boolean) {
-      prompt.hidden = !visible
+    /** What E does here, or null to hide the prompt. */
+    setPrompt(label: string | null) {
+      prompt.hidden = label === null
+      if (label !== null && promptLabel.textContent !== label) promptLabel.textContent = label
     },
     /** The farmer's words at screen position (x, y), or hide them with null. */
     setBubble(text: string | null, x = 0, y = 0) {
@@ -333,7 +337,7 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
       resetForm.hidden = true
       resetInput.value = ''
       resetConfirm.disabled = true
-      title.textContent = { welcome: '', continue: 'Grass Cutter', paused: 'Paused', finished: 'Meadow cleared', busy: 'Already open' }[kind]
+      title.textContent = { welcome: '', continue: 'Grass Cutter', paused: 'Paused', away: 'Still there?', finished: 'Meadow cleared', busy: 'Already open' }[kind]
       detail.textContent =
         kind === 'welcome'
           ? ''
@@ -341,7 +345,9 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
             ? 'Grass Cutter is running in another tab. Close it, then reload this one.'
             : kind === 'finished'
               ? `Every blade, in ${formatDuration(progress.minutes)}`
-              : `${formatShare(progress.share)} cut · ${fmt.format(Math.floor(progress.coins))} bCoins`
+              : kind === 'away'
+                ? 'The game pauses after three minutes without input'
+                : `${formatShare(progress.share)} cut · ${fmt.format(Math.floor(progress.coins))} bCoins`
       start.textContent = kind === 'welcome' ? 'Click to start' : 'Click to continue'
       start.hidden = kind === 'busy'
       certificate.hidden = kind !== 'finished'

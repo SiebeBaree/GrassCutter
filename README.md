@@ -16,7 +16,7 @@ pnpm dev
 | Mouse | Look |
 | Click or hold | Cut |
 | 1 to 6, or scroll | Switch to a tool you own |
-| E | Trade with the farmer, when you're at his stall |
+| E | Trade with the farmer at his stall, or fix a broken robot |
 | Esc | Pause |
 | M | Sound on or off |
 
@@ -39,13 +39,15 @@ Grass grows back while you play. A blade snipped out of tall grass is back in ab
 
 Two cows graze the meadow. Each eats about fifteen blades a minute, and every few minutes one of them leaves a pat. All the cut grass within two metres of it sprouts again, with a sunflower in the middle. Cows are solid, so walk or drive around them.
 
-A day lasts seven minutes and a night three. On half the nights a UFO glides in and stops in the sky in front of you. Its beam turns about a hundred blades purple and tall, and each one pays 100 bCoins when cut, by any tool. That's roughly 10,000 bCoins a visit. You'll hear it coming.
+A day lasts seven minutes and a night three. Every night a UFO glides in and stops in the sky in front of you. Its beam turns about a hundred blades purple and tall, and each one pays 100 bCoins when cut, by any tool. That's roughly 10,000 bCoins a visit. You'll hear it coming.
+
+Fourteen rocks hide in the meadow, most of them only just showing over the grass. The minimap marks them. Cut into one, or drive a mower into it, and that tool breaks. Take it back to the farmer and he fixes it for free. Robots leave the grass around rocks to you, but one crossing the meadow can still run into a rock. It stops and its antenna blinks red. Walk up to it and press E to shine your light on it for a couple of seconds. The nail clipper is too small to hit anything.
 
 Sunflowers come up now and then. Snip one with the nail clipper or scissors and the farmer pays 500 bCoins. Any other tool shreds it for nothing, robots included. A robot with clippers or scissors goes looking for them.
 
 Clear the last blade and the sky goes dark for a fireworks show. The pause menu then offers a certificate PNG with your name and how long it took.
 
-Progress saves every few seconds and when you pause or close the tab. To erase it, choose "Start over" in the pause menu and type ERASE. The game runs in one tab at a time.
+After three minutes without a key, click, scroll or mouse move, the game pauses, and the robots stop with it. Progress saves every few seconds and when you pause or close the tab. To erase it, choose "Start over" in the pause menu and type ERASE. The game runs in one tab at a time.
 
 ## How it works
 
@@ -54,7 +56,8 @@ Everything you see and hear is generated in code: Three.js meshes, GLSL shaders,
 - `src/field.ts` places one blade per cell of a jittered 20 cm grid, keeping the cells furthest inside an organic outline. The grid doubles as the lookup for picking, for the tools' cutting areas and for regrowth. Picking runs the grass shader's wind and push math on the CPU, so the crosshair selects the blade you actually see.
 - `src/grass.ts` draws the meadow in 12 m chunks with four levels of detail. Far chunks draw fewer, wider blades with fewer segments. Each blade has a growth byte, so a sprout is drawn as a short blade that grows a step a few times a second. Only the bytes and density texels that changed are uploaded.
 - `src/cows.ts` walks the cows from patch to patch. They graze where they stand, step away when you get close and drop pats that call `grass.sproutAround()`.
-- `src/ufo.ts` decides at dusk whether tonight gets a visit. The saucer glides in, hovers over the meadow ahead of you, beams it and accelerates away. Its hum is pitched by its speed toward you. Beamed blades get a byte of their own in `src/grass.ts` that the shader reads to draw them purple and taller.
+- `src/rocks.ts` places the rocks from a fixed seed and checks each tool's cutting area against them. The blades under a rock start cut and never sprout, so saves from before the rocks still open.
+- `src/ufo.ts` picks a time at dusk for tonight's visit. The saucer glides in, hovers over the meadow ahead of you, beams it and accelerates away. Its hum is pitched by its speed toward you. Beamed blades get a byte of their own in `src/grass.ts` that the shader reads to draw them purple and taller.
 - `src/robots.ts` gives each robot a target: a sunflower if it carries clippers or scissors, then the nearest grass, then the nearest patch no other robot has claimed. Machines prefer grass ahead of them, so they mow in lines.
 - `src/cutting.ts` holds how each tool cuts, shared by you and the robots.
 - `src/shop.ts` builds the stall and the farmer, who turns to face you and talks in a speech bubble. `src/icons.ts` photographs the tool models once at startup for the hotbar and the shop.
@@ -65,4 +68,4 @@ Everything you see and hear is generated in code: Three.js meshes, GLSL shaders,
 
 - `pnpm dev` starts the dev server
 - `pnpm build` typechecks and builds to `dist/`
-- `pnpm test` runs the field, economy and save tests
+- `pnpm test` runs the field, economy, rock and save tests

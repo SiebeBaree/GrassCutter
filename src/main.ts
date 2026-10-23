@@ -17,6 +17,7 @@ import { createParticles } from './particles'
 import { createPlayer } from './player'
 import { createRider } from './rider'
 import { createRobots } from './robots'
+import { bladesNearRocks, buildRocks, pushOutOfRocks, type Rock } from './rocks'
 import { clearSave, loadSave, writeSave, type Save } from './save'
 import { createShop } from './shop'
 import { createSign } from './sign'
@@ -39,6 +40,11 @@ const SHOW_SECONDS = 32
 /** Seconds to fade to night before the show, and back to day after it. */
 const DUSK_SECONDS = 4
 const DAWN_SECONDS = 7
+/** Seconds without any input before the game pauses itself, so nobody farms bCoins while away. */
+const IDLE_SECONDS = 180
+/** How close you need to be to a broken robot to fix it, and how long your light takes. */
+const FIX_REACH = 3.2
+const FIX_SECONDS = 2.5
 /** How you bend the grass, on foot and on the riding mower. */
 const PUSH = { body: [0.9, 0.32], rider: [1.4, 0.55], deck: [1.0, 0.5] } as const
 
@@ -82,9 +88,11 @@ let earned = saved?.earned ?? 0
 let playSeconds = saved?.playSeconds ?? 0
 let finishedAt = saved?.finishedAt ?? null
 let hasSave = saved !== null
+/** Your tools that hit a rock. The farmer fixes them. */
+const broken = new Set<Tier>(saved?.broken ?? [])
 
 let minimap: Minimap | null = null
-const grass = createGrass(field, growth, createNoiseTexture(), (d) => minimap?.cellChanged(d))
+const grass = createGrass(field, growth, createNoiseTexture(), (d) => minimap?.cellChanged(d), bladesNearRocks(field, 0))
 grass.restoreAlien(saved?.alien ?? [])
 const world = createWorld(renderer, grass.uniforms, field.edgeScale)
 const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
@@ -130,9 +138,25 @@ function onFlower(flower: Flower, harvested: boolean, by: Cutter) {
   }
 }
 
-const cutting = createCutting(field, growth, grass, sunflowers, { onFlower })
+function onRock(rock: Rock, tool: ToolId, by: Cutter) {
+  const at = placement(rock.x, rock.z)
+  audio.clank(at)
+  const name = TOOLS.find((t) => t.id === tool)?.name.toLowerCase() ?? tool
+  if (by === 'you') {
+    broken.add(TIERS[TOOLS.findIndex((t) => t.id === tool)])
+    mouseHeld = false
+    hud.toast(`Your ${name} hit a rock`, 5, 'It\'s broken. The farmer fixes it for free')
+  } else {
+    holdings.robots[by].broken = true
+    hud.toast(`Robot ${by + 1} hit a rock`, 6, 'Go to it and press E to fix it')
+  }
+  save()
+}
+
+const cutting = createCutting(field, growth, grass, sunflowers, { onFlower, onRock })
 const robots = createRobots(field, growth, grass, sunflowers, cutting, holdings.robots, {
   onCut: (count) => earn(count),
+  onRock,
   onSound(kind, x, z) {
     const at = placement(x, z)
     if (at.volume < 0.06) return
@@ -158,7 +182,7 @@ const cows = createCows(field, growth, grass, sunflowers, saved?.cows ?? [], {
   },
 })
 const ufo = createUfo(field)
-world.scene.add(...grass.meshes, grass.clippings, sign.group, shop.group, mower.group, rider.group, trimmer.group, sunflowers.mesh, robots.group, cows.group, ufo.group, ...particles.meshes)
+world.scene.add(...grass.meshes, grass.clippings, buildRocks(), sign.group, shop.group, mower.group, rider.group, trimmer.group, sunflowers.mesh, robots.group, cows.group, ufo.group, ...particles.meshes)
 
 const camera = new PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 1500)
 const viewmodel = createViewmodel(renderer)
@@ -186,6 +210,13 @@ let certificateHinted = false
 let clock = playSeconds
 let mooedAt = -Infinity
 let ufoHum: ReturnType<Audio['ufo']> = null
+/** Last keypress, click, scroll or mouse move, in ms. */
+let inputAt = performance.now()
+/** True once the game paused itself for lack of input, until you come back. */
+let away = false
+/** The broken robot you're shining your light on, and when you started. */
+let fixing: { robot: number; since: number } | null = null
+let brokenToastAt = -Infinity
 
 const toolId = (): ToolId => TOOLS[tool].id
 const minutesPlayed = () => Math.max(1, Math.round(playSeconds / 60))
@@ -206,6 +237,7 @@ function snapshot(): Save {
     finishedAt,
     cows: cows.states.map((c) => ({ ...c })),
     alien: grass.alienBlades(),
+    broken: [...broken],
   }
 }
 
@@ -316,6 +348,14 @@ function aim() {
 function useTool() {
   const id = toolId()
   const me = player.state
+  if (broken.has(tool)) {
+    readyAt = time + 0.5
+    if (time - brokenToastAt > 4) {
+      brokenToastAt = time
+      hud.toast(`Your ${TOOLS[tool].name.toLowerCase()} is broken`, 3, 'The farmer fixes it for free')
+    }
+    return
+  }
   if (id === 'clipper') {
     viewmodel.use(time)
     audio.snip()
@@ -346,6 +386,7 @@ function useTool() {
 
 /** Cuts whatever the sickle passed over since last frame: a slice of the wedge in front of you. */
 function sweepSickle() {
+  if (broken.has(tool)) return
   const elapsed = time - swingAt
   if (elapsed > SICKLE.swing * SICKLE.cutShare + 0.1) return
   const sweep = sickleSweep(elapsed)
@@ -364,6 +405,7 @@ const hands = new Vector3()
 function runMachines(dt: number) {
   const id = toolId()
   const me = player.state
+  const whole = !broken.has(tool)
   let cut = 0
   if (id === 'trimmer') {
     // The head aims for where the crosshair meets the ground, within reach of the handle. Walking carries
@@ -371,16 +413,16 @@ function runMachines(dt: number) {
     const want = ray.dy < 0 ? Math.hypot(ray.dx, ray.dz) * (-ray.oy / ray.dy) : TRIMMER.far
     trim.ahead += (Math.max(TRIMMER.near, Math.min(TRIMMER.far, want)) - trim.ahead) * Math.min(1, dt * TRIMMER.follow)
     placeTrimmer((TRIMMER.sweep * dt) / trim.ahead)
-    trim.spin = Math.max(0, Math.min(1, trim.spin + (mouseHeld ? dt * 6 : -dt * 2)))
+    trim.spin = Math.max(0, Math.min(1, trim.spin + (mouseHeld && whole ? dt * 6 : -dt * 2)))
     if (trim.spin > 0.6) {
       cut = cutting.circle(trim.x, trim.z, TRIMMER.radius, 'trimmer', me, time, 'you')
       if (cut) particles.chips(chute.set(trim.x, 0.15, trim.z), { x: trim.x - me.x, z: trim.z - me.z }, Math.min(8, 1 + cut), time)
     }
-  } else if (id === 'mower') {
+  } else if (id === 'mower' && whole) {
     cut = cutting.deck(mower.centre, mower.forward, MOWER.halfLength, MOWER.halfWidth, 'mower', time, 'you')
     const f = mower.forward
     if (cut) particles.chips(mower.chute(chute), { x: -f.z, z: f.x }, Math.min(14, 2 + cut), time)
-  } else if (id === 'rider') {
+  } else if (id === 'rider' && whole) {
     cut = cutting.deck(rider.centre, rider.forward, RIDER.halfLength, RIDER.halfWidth, 'rider', time, 'you')
     const f = rider.forward
     if (cut) particles.chips(rider.chute(chute), { x: -f.z, z: f.x }, Math.min(18, 3 + cut / 2), time)
@@ -423,6 +465,7 @@ function pitch(first: boolean) {
     `I pay ${SUNFLOWER_VALUE} for every sunflower cut by hand. Mowed ones are no use to me.`,
   ]
   if (holdings.robots.length < 3) lines.push('A robot cuts while you cut. Never takes a break.')
+  if (broken.size) return pick(['Hit a rock? Bring it here, I fix it for free.', "Broke something? Fixing's free."])
   if (toolId() === 'clipper') lines.push('Nail clippers? Brave.')
   if (toolId() === 'rider') lines.push('Nice ride.')
   return pick(lines)
@@ -433,8 +476,16 @@ const nearFarmer = () => Math.hypot(player.state.x - FARMER.x, player.state.z - 
 function openShop() {
   mouseHeld = false
   hud.openShop(holdings)
-  hud.setPrompt(false)
-  shop.say(holdings.coins < (cheapestOffer(holdings)?.price ?? 0) ? 'Just looking? No charge for that.' : 'What can I get you?', time)
+  hud.setPrompt(null)
+  if (broken.size) {
+    const names = [...broken].map((t) => TOOLS[t].name.toLowerCase())
+    broken.clear()
+    shop.say(`Fixed your ${names.join(' and ')}. No charge.`, time)
+    audio.beep()
+    save()
+  } else {
+    shop.say(holdings.coins < (cheapestOffer(holdings)?.price ?? 0) ? 'Just looking? No charge for that.' : 'What can I get you?', time)
+  }
   document.exitPointerLock()
 }
 
@@ -448,6 +499,7 @@ function closeShop(relock: boolean) {
 const hud = createHud(document.body, {
   onStart() {
     if (!ownsTab) return
+    away = false
     audio.unlock()
     if (!hasSave) {
       // The welcome sign only greets players without a save, so starting once creates one.
@@ -490,8 +542,8 @@ const hud = createHud(document.body, {
 })
 hud.setIcons(renderIcons())
 
-const pausedMenu = () => (finishedAt !== null ? 'finished' : 'paused')
-hud.update(holdings.coins, cutShare(), holdings.tier, tool)
+const pausedMenu = () => (finishedAt !== null ? 'finished' : away ? 'away' : 'paused')
+hud.update(holdings.coins, cutShare(), holdings.tier, tool, broken)
 hud.showMenu(!ownsTab ? 'busy' : !hasSave ? 'welcome' : finishedAt !== null ? 'finished' : 'continue', progress())
 equip(tool)
 if (finishedAt !== null) sign.showFinished(formatDuration(minutesPlayed()))
@@ -514,6 +566,11 @@ document.addEventListener('pointerlockchange', () => {
 document.addEventListener('pointerlockerror', () => {
   if (!playing && !hud.shopOpen) hud.showMenu(pausedMenu(), progress())
 })
+
+// Any input counts as being here. Held keys don't repeat into it, so a weighted-down key still goes idle.
+const touch = () => (inputAt = performance.now())
+for (const kind of ['mousemove', 'mousedown', 'wheel'] as const) document.addEventListener(kind, touch, { passive: true })
+window.addEventListener('keydown', (e) => !e.repeat && touch())
 
 document.addEventListener('mousemove', (e) => {
   if (!playing) return
@@ -567,6 +624,11 @@ window.addEventListener('keydown', (e) => {
     openShop()
     return
   }
+  if (playing && e.code === 'KeyE' && !fixing) {
+    const robot = robots.brokenNear(player.state, FIX_REACH)
+    if (robot >= 0) fixing = { robot, since: time }
+    return
+  }
   const slot = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code)
   if (playing && slot >= 0) {
     if (slot <= holdings.tier) equip(TIERS[slot])
@@ -611,19 +673,24 @@ function showDaylight() {
 
 const bubbleAt = new Vector3()
 
-/** Cows are solid. Pushes you, or the mower you're behind or on, out of them; a bumped cow complains. */
-function bumpCows() {
+/**
+ * Cows and rocks are solid. Pushes you, or the mower you're behind or on, out of them. A bumped cow
+ * complains; a mower driven into a rock breaks.
+ */
+function bump() {
   const id = toolId()
   const me = player.state
   const [ahead, radius] = id === 'rider' ? [0.55, 1.05] : id === 'mower' ? [0.9, 0.7] : [0, 0.35]
   const fx = -Math.sin(me.yaw)
   const fz = -Math.cos(me.yaw)
   const body = { x: me.x + fx * ahead, z: me.z + fz * ahead }
+  const rock = pushOutOfRocks(body, radius)
   const bumped = cows.push(body, radius)
-  if (!bumped) return
+  if (rock && (id === 'mower' || id === 'rider') && !broken.has(tool)) onRock(rock, id, 'you')
+  if (!bumped && !rock) return
   me.x = body.x - fx * ahead
   me.z = body.z - fz * ahead
-  if (time - mooedAt > 6) {
+  if (bumped && time - mooedAt > 6) {
     mooedAt = time
     audio.moo(placement(bumped.x, bumped.z))
   }
@@ -666,6 +733,37 @@ function setPushers() {
   else p.set([PARKED, PARKED, 1, 0], 4)
 }
 
+const lightFrom = new Vector3()
+
+/**
+ * Shines your light on the robot you're fixing until it's done. Walking off or pausing stops it. Returns
+ * what E would do right now, for the prompt.
+ */
+function tendRobots(): string | null {
+  if (fixing && (!playing || robots.brokenNear(player.state, FIX_REACH + 0.6) !== fixing.robot)) fixing = null
+  if (!fixing) {
+    robots.shine(-1, lightFrom, time)
+    if (!playing) return null
+    if (nearFarmer()) return 'Shop'
+    const robot = robots.brokenNear(player.state, FIX_REACH)
+    return robot >= 0 ? `Fix robot ${robot + 1}` : null
+  }
+  // From about where your hand is.
+  lightFrom.set(0.22, -0.32, -0.3).applyQuaternion(camera.quaternion).add(camera.position)
+  robots.shine(fixing.robot, lightFrom, time)
+  if (time - fixing.since < FIX_SECONDS) return null
+  const { robot } = fixing
+  fixing = null
+  robots.shine(-1, lightFrom, time)
+  robots.fix(robot)
+  const at = holdings.robots[robot]
+  audio.beep(placement(at.x, at.z))
+  particles.sparkle(at.x, 1.2, at.z, time)
+  hud.toast(`Robot ${robot + 1} is fixed`, 3)
+  save()
+  return null
+}
+
 // Frame pacing: render no more than MAX_FPS (MENU_FPS behind the menu), and lower the resolution
 // if the machine can't keep up.
 let last = performance.now()
@@ -706,6 +804,13 @@ renderer.setAnimationLoop((now) => {
     }
   }
 
+  // Three minutes without input pauses the game, and with it the robots.
+  if ((playing || hud.shopOpen) && performance.now() - inputAt > IDLE_SECONDS * 1000) {
+    away = true
+    if (hud.shopOpen) closeShop(false)
+    else document.exitPointerLock()
+  }
+
   // The meadow lives while you're in the game: playing, or browsing the shop. Not behind the pause menu.
   const active = ownsTab && (playing || hud.shopOpen)
   const growing = active && finishedAt === null
@@ -713,7 +818,7 @@ renderer.setAnimationLoop((now) => {
   if (active) clock += seconds
   if (playing) {
     const steps = player.update(dt)
-    bumpCows()
+    bump()
     const density = grass.densityAt(player.state.x, player.state.z)
     if (steps > 0 && density > 0.15) audio.rustle(0.05 + density * 0.07, 0.3)
   }
@@ -739,7 +844,7 @@ renderer.setAnimationLoop((now) => {
     trimmer.update(trim.x, trim.z, hands, time, dt, trim.spin)
   }
   const engine = id === 'mower' || id === 'rider' || id === 'trimmer' ? id : null
-  const engineOn = working && (id === 'trimmer' ? trim.spin > 0.05 : engine !== null)
+  const engineOn = working && !broken.has(tool) && (id === 'trimmer' ? trim.spin > 0.05 : engine !== null)
   audio.engine('you', engine, engineOn, mowLoad, id === 'trimmer' ? trim.spin : Math.min(1, player.speed / 5))
 
   if (playing) {
@@ -774,7 +879,7 @@ renderer.setAnimationLoop((now) => {
   } else {
     hud.setBubble(null)
   }
-  hud.setPrompt(playing && nearFarmer())
+  hud.setPrompt(tendRobots())
 
   const day = Math.min(daylightAt(clock), showDaylight())
   world.setDaylight(day)
@@ -793,7 +898,7 @@ renderer.setAnimationLoop((now) => {
   viewmodel.update(time, dt, player.bob, lookX, lookY)
   lookX = 0
   lookY = 0
-  hud.update(holdings.coins, cutShare(), holdings.tier, tool)
+  hud.update(holdings.coins, cutShare(), holdings.tier, tool, broken)
   if (hud.shopOpen && time - shopRefreshedAt > 0.25) {
     shopRefreshedAt = time
     hud.refreshShop(holdings)

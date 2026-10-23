@@ -15,12 +15,10 @@ import { inMeadow, type Field, type Vec2 } from './field'
 import type { Driver } from './mower'
 import { UFO_GRASS } from './tools'
 
-// On half the nights a flying saucer glides in, stops in the sky in front of you and shines its beam
+// Every night a flying saucer glides in, stops in the sky in front of you and shines its beam
 // on the meadow. The grass under it turns purple and grows tall, and each of those blades pays well.
 // Then it shoots off.
 
-/** Chance that a night gets a visit. */
-const VISIT_CHANCE = 0.5
 /** Metres along its path it starts and ends from where it hovers. */
 const PATH = 320
 /** Seconds to glide in and slow to a stop, to hover with the beam on, and to shoot off. */
@@ -101,7 +99,7 @@ export function createUfo(field: Field, random = Math.random) {
   group.visible = false
 
   let visit: Visit | null = null
-  /** When the next visit is due, or null if tonight has none (or it's day). */
+  /** When tonight's visit is due, or null once it has come (or it's day). */
   let dueAt: number | null = null
   let wasNight = false
   let lastTime = 0
@@ -149,7 +147,7 @@ export function createUfo(field: Field, random = Math.random) {
       const dt = Math.max(1e-3, time - lastTime)
       lastTime = time
       // Due somewhere in the first half of the night, so it's gone by dawn.
-      if (night && !wasNight) dueAt = random() < VISIT_CHANCE ? time + 10 + random() * 70 : null
+      if (night && !wasNight) dueAt = time + 10 + random() * 70
       if (!night) dueAt = null
       wasNight = night
       if (active && dueAt !== null && time >= dueAt && !visit) {
