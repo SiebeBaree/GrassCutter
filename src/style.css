@@ -536,9 +536,14 @@ kbd {
   text-decoration: underline;
 }
 
-.menu-reset.armed {
+.menu .menu-erase {
   color: #ffb4a8;
-  opacity: 1;
+}
+
+.menu .menu-erase:disabled {
+  opacity: 0.4;
+  cursor: default;
+  text-decoration: none;
 }
 
 .menu-hint {

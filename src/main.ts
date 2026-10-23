@@ -548,6 +548,8 @@ document.addEventListener(
 )
 
 window.addEventListener('keydown', (e) => {
+  // Typing in the menu (a name, the reset word) isn't a game key.
+  if (e.target instanceof HTMLInputElement) return
   if (e.code === 'KeyM') {
     audio.unlock()
     hud.toast(audio.toggleMute() ? 'Sound off' : 'Sound on', 1.5)

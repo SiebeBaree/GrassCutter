@@ -13,6 +13,9 @@ export type Progress = { share: number; coins: number; minutes: number }
 /** Tool icons, rendered from the 3D models, by tier; plus the robot. */
 export type Icons = { tools: string[]; robot: string }
 
+/** What you type to erase your save. */
+const RESET_WORD = 'ERASE'
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text = '') {
   const node = document.createElement(tag)
   node.className = className
@@ -125,12 +128,21 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   download.type = 'submit'
   certificate.append(nameInput, download)
 
+  // Starting over takes typing a word, so a stray click can't wipe three hours of mowing.
   const reset = el('button', 'menu-reset', 'Start over')
+  const resetForm = el('form', 'certificate')
+  const resetInput = el('input', 'certificate-name')
+  resetInput.placeholder = `Type ${RESET_WORD} to confirm`
+  resetInput.autocomplete = 'off'
+  resetInput.spellcheck = false
+  const resetConfirm = el('button', 'certificate-download menu-erase', 'Erase all progress')
+  resetConfirm.type = 'submit'
+  resetForm.append(resetInput, resetConfirm)
+  resetForm.hidden = true
   const hint = el('p', 'menu-hint', '1-6 or scroll for tools · E shop · M sound')
-  menu.append(title, detail, start, certificate, reset, hint)
+  menu.append(title, detail, start, certificate, reset, resetForm, hint)
   root.append(crosshair, wallet, status, prompt, bubble, toast, shop, menu)
 
-  let confirmingReset = false
   let menuKind: MenuKind = 'welcome'
   let toastTimer = 0
   let shownCoins = -1
@@ -142,17 +154,22 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   /** The rows rebuild after a purchase, so a double click would land on the next thing for sale. */
   let boughtAt = -Infinity
 
-  // The whole menu starts the game, except the reset button and the certificate form.
+  // The whole menu starts the game, except the reset controls and the certificate form.
   menu.addEventListener('click', (e) => {
     if (menuKind === 'busy') return
-    if (e.target === reset || (e.target instanceof Node && certificate.contains(e.target))) return
+    if (e.target === reset || (e.target instanceof Node && (certificate.contains(e.target) || resetForm.contains(e.target)))) return
     handlers.onStart()
   })
+  const resetTyped = () => resetInput.value.trim().toUpperCase() === RESET_WORD
   reset.addEventListener('click', () => {
-    if (confirmingReset) return handlers.onReset()
-    confirmingReset = true
-    reset.textContent = 'Click again to erase all progress'
-    reset.classList.add('armed')
+    reset.hidden = true
+    resetForm.hidden = false
+    resetInput.focus()
+  })
+  resetInput.addEventListener('input', () => (resetConfirm.disabled = !resetTyped()))
+  resetForm.addEventListener('submit', (e) => {
+    e.preventDefault()
+    if (resetTyped()) handlers.onReset()
   })
   certificate.addEventListener('submit', (e) => {
     e.preventDefault()
@@ -313,9 +330,9 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
     },
     showMenu(kind: MenuKind, progress: Progress) {
       menuKind = kind
-      confirmingReset = false
-      reset.textContent = 'Start over'
-      reset.classList.remove('armed')
+      resetForm.hidden = true
+      resetInput.value = ''
+      resetConfirm.disabled = true
       title.textContent = { welcome: '', continue: 'Grass Cutter', paused: 'Paused', finished: 'Meadow cleared', busy: 'Already open' }[kind]
       detail.textContent =
         kind === 'welcome'

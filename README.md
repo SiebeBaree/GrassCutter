@@ -45,7 +45,7 @@ Sunflowers come up now and then. Snip one with the nail clipper or scissors and 
 
 Clear the last blade and the sky goes dark for a fireworks show. The pause menu then offers a certificate PNG with your name and how long it took.
 
-Progress saves every few seconds and when you pause or close the tab. "Start over" in the pause menu erases it. The game runs in one tab at a time.
+Progress saves every few seconds and when you pause or close the tab. To erase it, choose "Start over" in the pause menu and type ERASE. The game runs in one tab at a time.
 
 ## How it works
 
