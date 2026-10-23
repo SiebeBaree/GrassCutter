@@ -1,5 +1,5 @@
 // Every sound is synthesised: filtered noise for wind, rustling, swooshes and bangs, oscillators for
-// metal, engines, coins, robot beeps, the farmer's voice and fanfares.
+// metal, engines, coins, robot beeps, the farmer's voice, cows, crickets, the UFO and fanfares.
 
 const MUTE_KEY = 'grass-cutter/muted'
 const VOLUME = 0.8
@@ -25,6 +25,8 @@ export function createAudio() {
   let noise: AudioBuffer | null = null
   const engines = new Map<string, ReturnType<typeof createEngine>>()
   let muted = readMuted()
+  /** Crickets instead of birds. */
+  let night = false
 
   function readMuted() {
     try {
@@ -76,11 +78,27 @@ export function createAudio() {
   }
 
   function scheduleBird() {
-    setTimeout(() => {
-      const live = running()
-      if (live) chirp(live.ac, live.out)
-      scheduleBird()
-    }, 3500 + Math.random() * 9000)
+    setTimeout(
+      () => {
+        const live = running()
+        if (live) (night ? cricket : chirp)(live.ac, live.out)
+        scheduleBird()
+      },
+      night ? 900 + Math.random() * 2500 : 3500 + Math.random() * 9000,
+    )
+  }
+
+  /** A cricket somewhere in the grass: a few bursts of fast, high clicks. */
+  function cricket(ac: AudioContext, out: GainNode) {
+    const pan = ac.createStereoPanner()
+    pan.pan.value = Math.random() * 1.8 - 0.9
+    pan.connect(out)
+    const pitch = 4300 + Math.random() * 900
+    const volume = 0.008 + Math.random() * 0.012
+    const chirps = 2 + Math.floor(Math.random() * 4)
+    for (let c = 0; c < chirps; c++) {
+      for (let p = 0; p < 4; p++) ping(ac, pan, ac.currentTime + c * 0.32 + p * 0.022, pitch, volume, 0.018)
+    }
   }
 
   function chirp(ac: AudioContext, out: GainNode) {
@@ -296,6 +314,132 @@ export function createAudio() {
         const made = engine ?? createEngine(live.ac, live.out, noise, kind)
         engines.set(key, made)
         made.set(on, load, speed, volume)
+      }
+    },
+    /** Birds by day, crickets by night. */
+    setNight(value: boolean) {
+      night = value
+    },
+    /** A cow lowing: a buzzy tone through a vowel that opens from mmm to ooo. */
+    moo(at = HERE) {
+      const live = running()
+      if (!live) return
+      const { ac } = live
+      const out = placed(ac, live.out, at)
+      const t = ac.currentTime
+      const length = 1.2 + Math.random() * 0.5
+      const base = 105 + Math.random() * 30
+      const osc = ac.createOscillator()
+      osc.type = 'sawtooth'
+      osc.frequency.setValueAtTime(base, t)
+      osc.frequency.linearRampToValueAtTime(base * 1.18, t + 0.3)
+      osc.frequency.linearRampToValueAtTime(base * 0.85, t + length)
+      const vowel = ac.createBiquadFilter()
+      vowel.type = 'bandpass'
+      vowel.Q.value = 2.2
+      vowel.frequency.setValueAtTime(320, t)
+      vowel.frequency.linearRampToValueAtTime(780, t + 0.35)
+      vowel.frequency.linearRampToValueAtTime(520, t + length)
+      const gain = ac.createGain()
+      gain.gain.setValueAtTime(0, t)
+      gain.gain.linearRampToValueAtTime(0.5, t + 0.15)
+      gain.gain.setValueAtTime(0.42, t + length - 0.3)
+      gain.gain.linearRampToValueAtTime(0, t + length)
+      osc.connect(vowel).connect(gain).connect(out)
+      osc.start(t)
+      osc.stop(t + length + 0.05)
+    },
+    /** Something soft and heavy landing in the grass. */
+    plop(at = HERE) {
+      const live = running()
+      if (!live) return
+      const { ac } = live
+      const out = placed(ac, live.out, at)
+      const t = ac.currentTime
+      noiseBurst(ac, out, t, 0.16, 'lowpass', 450, 1.2, 0.5)
+      noiseBurst(ac, out, t + 0.13, 0.22, 'lowpass', 300, 1.5, 0.4)
+      const osc = ac.createOscillator()
+      osc.frequency.setValueAtTime(190, t)
+      osc.frequency.exponentialRampToValueAtTime(55, t + 0.14)
+      const gain = ac.createGain()
+      gain.gain.setValueAtTime(0.3, t)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18)
+      osc.connect(gain).connect(out)
+      osc.start(t)
+      osc.stop(t + 0.2)
+    },
+    /**
+     * The hum of a passing UFO: two warbling tones that beat against each other over a low drone.
+     * Returns a handle to move it each frame (pitch 1 is at rest, Doppler bends it) and to end it.
+     */
+    ufo() {
+      const live = running()
+      if (!live) return null
+      const { ac } = live
+      const pan = ac.createStereoPanner()
+      const level = ac.createGain()
+      level.gain.value = 0
+      pan.connect(level).connect(live.out)
+      const filter = ac.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.value = 1800
+      filter.connect(pan)
+
+      const voices = [
+        { hz: 330, type: 'sine', gain: 0.12 },
+        { hz: 333.5, type: 'sine', gain: 0.1 },
+        { hz: 55, type: 'triangle', gain: 0.22 },
+      ] as const
+      const warble = ac.createOscillator()
+      warble.frequency.value = 5.5
+      const sweep = ac.createOscillator()
+      sweep.frequency.value = 0.45
+      const oscillators = voices.map((v) => {
+        const osc = ac.createOscillator()
+        osc.type = v.type
+        osc.frequency.value = v.hz
+        const gain = ac.createGain()
+        gain.gain.value = v.gain
+        osc.connect(gain).connect(filter)
+        if (v.hz > 100) {
+          const warbleDepth = ac.createGain()
+          warbleDepth.gain.value = v.hz * 0.05
+          warble.connect(warbleDepth).connect(osc.frequency)
+          const sweepDepth = ac.createGain()
+          sweepDepth.gain.value = v.hz * 0.25
+          sweep.connect(sweepDepth).connect(osc.frequency)
+        }
+        return { osc, hz: v.hz }
+      })
+      const all = [warble, sweep, ...oscillators.map((o) => o.osc)]
+      for (const o of all) o.start()
+
+      return {
+        set(at: Placement, pitch: number) {
+          const t = ac.currentTime
+          level.gain.setTargetAtTime(at.volume, t, 0.1)
+          pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, at.pan)), t, 0.1)
+          for (const o of oscillators) o.osc.frequency.setTargetAtTime(o.hz * pitch, t, 0.1)
+        },
+        /** A rising zap as it shoots off. */
+        zap(at: Placement) {
+          const t = ac.currentTime
+          const osc = ac.createOscillator()
+          osc.frequency.setValueAtTime(260, t)
+          osc.frequency.exponentialRampToValueAtTime(2600, t + 0.9)
+          const gain = ac.createGain()
+          gain.gain.setValueAtTime(0, t)
+          gain.gain.linearRampToValueAtTime(0.18 * at.volume, t + 0.05)
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 1)
+          osc.connect(gain).connect(live.out)
+          osc.start(t)
+          osc.stop(t + 1.05)
+        },
+        stop() {
+          const t = ac.currentTime
+          level.gain.setTargetAtTime(0, t, 0.15)
+          for (const o of all) o.stop(t + 1)
+        },
       }
     },
     /** Coins changing hands at the stall. */

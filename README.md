@@ -29,13 +29,17 @@ Every blade you cut pays one bCoin. Spend them at the farm shop next to where yo
 | Nail clipper | free | One blade per snip |
 | Scissors | 2,500 | Every blade in a small patch |
 | Sickle | 12,000 | A wedge in front of you, swing after swing |
-| Lawn trimmer | 45,000 | A spinning line that follows your aim while you hold the mouse |
+| Lawn trimmer | 45,000 | A spinning line held out where you look, while you hold the mouse |
 | Lawn mower | 140,000 | Everything under the deck as you walk |
-| Riding mower | 350,000 | A seat and a deck nearly two metres wide, at two and a half times walking pace |
+| Riding mower | 350,000 | A seat, flames on the hood and a deck nearly two metres wide, at two and a half times walking pace. Floor it and the headers spit fire |
 
 He also sells up to three robots (8,000, 50,000 and 150,000). Each one finds grass on its own and cuts it at half your pace with whatever tool you buy it. They start with a nail clipper and climb the same ladder as you, a little cheaper.
 
-Grass grows back while you play. Cut blades next to standing grass slowly sprout again, so ragged edges creep back. Ground with no grass next to it stays clear, so the meadow can be finished.
+Grass grows back while you play. A blade snipped out of tall grass is back in about three minutes, and the edge of a mown patch creeps in a row every seven or so. Ground with no grass next to it stays clear, so the meadow can be finished.
+
+Two cows graze the meadow. Each eats about fifteen blades a minute, and every few minutes one of them leaves a pat. All the cut grass within two metres of it sprouts again, with a sunflower in the middle. Cows are solid, so walk or drive around them.
+
+A day lasts seven minutes and a night three. Some nights a UFO drifts over, hangs above the meadow with its beam on and shoots off. You'll hear it before you see it.
 
 Sunflowers come up now and then. Snip one with the nail clipper or scissors and the farmer pays 500 bCoins. Any other tool shreds it for nothing, robots included. A robot with clippers or scissors goes looking for them.
 
@@ -49,11 +53,13 @@ Everything you see and hear is generated in code: Three.js meshes, GLSL shaders,
 
 - `src/field.ts` places one blade per cell of a jittered 20 cm grid, keeping the cells furthest inside an organic outline. The grid doubles as the lookup for picking, for the tools' cutting areas and for regrowth. Picking runs the grass shader's wind and push math on the CPU, so the crosshair selects the blade you actually see.
 - `src/grass.ts` draws the meadow in 12 m chunks with four levels of detail. Far chunks draw fewer, wider blades with fewer segments. Each blade has a growth byte, so a sprout is drawn as a short blade that grows a step a few times a second. Only the bytes and density texels that changed are uploaded.
+- `src/cows.ts` walks the cows from patch to patch. They graze where they stand, step away when you get close and drop pats that call `grass.sproutAround()`.
+- `src/ufo.ts` decides at dusk whether tonight gets a visit. The saucer glides in on a path past you, hovers, then accelerates away. Its hum is pitched by its speed toward you.
 - `src/robots.ts` gives each robot a target: a sunflower if it carries clippers or scissors, then the nearest grass, then the nearest patch no other robot has claimed. Machines prefer grass ahead of them, so they mow in lines.
 - `src/cutting.ts` holds how each tool cuts, shared by you and the robots.
 - `src/shop.ts` builds the stall and the farmer, who turns to face you and talks in a speech bubble. `src/icons.ts` photographs the tool models once at startup for the hotbar and the shop.
-- `src/save.ts` stores a JSON header plus one bit per blade, in grid order so mown stripes compress well. `src/vault.ts` compresses it and seals it with AES-GCM. The key comes from a secret in the game, a random salt made on your first visit and your browser, so an edited or copied save fails to open and the game starts fresh.
-- The sky is rendered into a cube map once at startup. Static models are baked into one mesh per material. The frame rate is capped at 60 (30 behind menus), and the resolution drops if the machine can't keep up.
+- `src/save.ts` stores a JSON header plus one bit per blade, in grid order so mown stripes compress well. Fields added after 3.0, like the cows, are optional, so older v3 saves still open. `src/vault.ts` compresses it and seals it with AES-GCM. The key comes from a secret in the game, a random salt made on your first visit and your browser, so an edited or copied save fails to open and the game starts fresh.
+- The day-night clock runs off your play time, so a reload picks up at the same hour. The sky is rendered into a cube map once at startup and fades into a moonlit, starry night. Static models are baked into one mesh per material. The frame rate is capped at 60 (30 behind menus), and the resolution drops if the machine can't keep up.
 
 ## Scripts
 

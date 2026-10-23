@@ -2,7 +2,7 @@ import { Color, Vector3 } from 'three'
 
 // One sun, one sky. Custom shaders read these uniforms; standard materials get a matching
 // DirectionalLight plus an environment map rendered from the sky. setDaylight() fades all of it to
-// moonlight for the fireworks at the end.
+// moonlight, for the nights and for the fireworks at the end.
 
 export const SUN_DIR = new Vector3(0.55, 0.5, 0.67).normalize()
 export const SUN_INTENSITY = 2.5
@@ -40,4 +40,26 @@ export function setDaylight(day: number) {
   lightUniforms.uSkyColor.value.lerpColors(NIGHT.sky, DAY.sky, day)
   lightUniforms.uGroundColor.value.lerpColors(NIGHT.ground, DAY.ground, day)
   FOG_COLOR.lerpColors(NIGHT.fog, DAY.fog, day)
+}
+
+/** Seconds of daylight and of night in one turn of the clock. */
+export const DAY_SECONDS = 7 * 60
+export const NIGHT_SECONDS = 3 * 60
+/** Seconds dusk and dawn each take. */
+const TWILIGHT_SECONDS = 30
+/** How dark a night gets, where 0 is the fireworks sky. Dark enough for stars, light enough to mow. */
+const NIGHT_LEVEL = 0.04
+
+/**
+ * Daylight `seconds` into the game: 1 by day, NIGHT_LEVEL by night. A new game starts in the morning;
+ * dusk falls just before seven minutes in.
+ */
+export function daylightAt(seconds: number) {
+  const cycle = DAY_SECONDS + NIGHT_SECONDS
+  // Measured from the start of dawn.
+  const t = (((seconds + TWILIGHT_SECONDS) % cycle) + cycle) % cycle
+  const dawn = Math.min(1, t / TWILIGHT_SECONDS)
+  const dusk = Math.min(1, Math.max(0, (t - DAY_SECONDS) / TWILIGHT_SECONDS))
+  const ease = (v: number) => v * v * (3 - 2 * v)
+  return NIGHT_LEVEL + (1 - NIGHT_LEVEL) * (ease(dawn) - ease(dusk))
 }

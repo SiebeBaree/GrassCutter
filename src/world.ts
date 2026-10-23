@@ -108,13 +108,14 @@ function bakeDaySky(renderer: WebGLRenderer) {
   return target.texture
 }
 
-/** The visible sky: the baked day sky, faded into a starry night by uDaylight. */
+/** The visible sky: the baked day sky, faded into a moonlit, starry night by uDaylight. */
 function createSky(daySky: Texture) {
   const material = new ShaderMaterial({
     uniforms: {
       uDaySky: { value: daySky },
       uDaylight: { value: 1 },
       uFogColor: { value: new Color() },
+      uMoonDir: { value: SUN_DIR },
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -128,6 +129,7 @@ function createSky(daySky: Texture) {
       uniform samplerCube uDaySky;
       uniform float uDaylight;
       uniform vec3 uFogColor;
+      uniform vec3 uMoonDir;
       varying vec3 vDir;
 
       float hash3(vec3 p) {
@@ -148,6 +150,9 @@ function createSky(daySky: Texture) {
           vec3 offset = d * 220.0 - cell - 0.5;
           float twinkle = 0.7 + 0.3 * hash3(cell + 7.0);
           night += vec3(0.9, 0.95, 1.0) * smoothstep(0.985, 1.0, star) * smoothstep(0.3, 0.0, length(offset)) * twinkle * 2.5 * smoothstep(0.0, 0.25, d.y);
+          // The moon hangs where the sun was, so the moonlight comes from it.
+          float moon = dot(d, uMoonDir);
+          night += vec3(0.85, 0.9, 1.0) * (smoothstep(0.99955, 0.9997, moon) * 2.0 + pow(max(moon, 0.0), 400.0) * 0.25);
           col = mix(night, col, uDaylight);
         }
         gl_FragColor = vec4(col, 1.0);

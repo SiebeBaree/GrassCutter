@@ -9,7 +9,10 @@ import { browserFingerprint, deriveKey, installSalt, seal, unseal } from './vaul
 // position) followed by one bit per blade. The bits run in grid order rather than blade order, so a
 // mown stripe is a run of zeros and the whole thing compresses well.
 
-/** Bump when field generation changes: old bitsets would point at different blades. */
+/**
+ * Bump when field generation changes: old bitsets would point at different blades. Fields added since
+ * (like the cows in 3.1) are optional instead, so saves from earlier 3.x builds keep opening.
+ */
 const SAVE_VERSION = 3
 const SAVE_KEY = 'grass-cutter/v3'
 /**
@@ -21,8 +24,10 @@ const ASIDE_KEY = 'grass-cutter/v3-unopened'
 /** Saves from earlier versions. They don't carry over, so they're deleted on load. */
 const OLD_KEYS = ['grass-cutter/save']
 const MAX_SUNFLOWERS = 40
+const MAX_COWS = 8
 
 const PlayerSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number(), pitch: z.number() })
+const SpotSchema = z.object({ x: z.number(), z: z.number(), yaw: z.number() })
 const TierSchema = z.literal([0, 1, 2, 3, 4, 5])
 
 const HeaderSchema = z.object({
@@ -38,9 +43,12 @@ const HeaderSchema = z.object({
   playSeconds: z.number().nonnegative().catch(0),
   /** When the last blade fell, in ms since the epoch. */
   finishedAt: z.number().nullable().catch(null),
+  /** Added in 3.1. Missing from older saves, which then start a fresh herd. */
+  cows: z.array(SpotSchema).max(MAX_COWS).catch([]),
 })
 
 export type PlayerState = z.infer<typeof PlayerSchema>
+export type CowSave = z.infer<typeof SpotSchema>
 
 export type Save = {
   /** 255 for every standing blade, 0 for every cut one. */
@@ -56,6 +64,7 @@ export type Save = {
   player: PlayerState
   playSeconds: number
   finishedAt: number | null
+  cows: CowSave[]
 }
 
 const finite = (...values: number[]) => values.every(Number.isFinite)
@@ -75,6 +84,7 @@ export function encodeSave(save: Save, cellBlade: Int32Array) {
       player: finite(x, pz, yaw, pitch) ? save.player : SPAWN,
       playSeconds: Number.isFinite(save.playSeconds) ? save.playSeconds : 0,
       finishedAt: save.finishedAt,
+      cows: save.cows.filter((c) => finite(c.x, c.z, c.yaw)).slice(0, MAX_COWS),
     } satisfies z.input<typeof HeaderSchema>),
   )
   const bytes = new Uint8Array(4 + header.length + BLADE_COUNT / 8)

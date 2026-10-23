@@ -1,6 +1,7 @@
 import { ACESFilmicToneMapping, PerspectiveCamera, Vector3, WebGLRenderer } from 'three'
-import { createAudio, type Placement } from './audio'
+import { createAudio, type Audio, type Placement } from './audio'
 import { downloadCertificate } from './certificate'
+import { createCows } from './cows'
 import { createCutting, type Cutter } from './cutting'
 import { buy, cheapestOffer, type Holdings, type Purchase } from './economy'
 import { BLADE_COUNT, createField, PARKED, pickBlade, type Pick, type Ray } from './field'
@@ -8,6 +9,7 @@ import { createGrass } from './grass'
 import { createHud, formatDuration } from './hud'
 import { renderIcons } from './icons'
 import { FARMER, ROBOT_DOOR, SPAWN, STALL, TRADE_DISTANCE } from './layout'
+import { daylightAt } from './light'
 import { createMinimap, type Minimap } from './minimap'
 import { createMower } from './mower'
 import { createNoiseTexture } from './noise'
@@ -22,6 +24,7 @@ import type { Flower } from './sunflowers'
 import { createSunflowers } from './sunflowers'
 import { CLIPPER, MOWER, RIDER, SCISSORS, SICKLE, sickleSweep, SUNFLOWER_VALUE, TIERS, TOOLS, TRIMMER, type Tier, type ToolId } from './tools'
 import { createTrimmer } from './trimmer'
+import { createUfo } from './ufo'
 import { createViewmodel } from './viewmodel'
 import { createWorld } from './world'
 import './style.css'
@@ -142,7 +145,19 @@ const robots = createRobots(field, growth, grass, sunflowers, cutting, holdings.
   },
 })
 robots.tidy()
-world.scene.add(...grass.meshes, grass.clippings, sign.group, shop.group, mower.group, rider.group, trimmer.group, sunflowers.mesh, robots.group, ...particles.meshes)
+const cows = createCows(field, growth, grass, sunflowers, saved?.cows ?? [], {
+  onPat(x, z) {
+    const at = placement(x, z)
+    audio.plop(at)
+    if (at.volume > 0.05) hud.toast('A cow left a pat', 3.5, 'The grass around it grows back, with a sunflower')
+  },
+  onMoo(x, z) {
+    const at = placement(x, z)
+    if (at.volume > 0.02) audio.moo(at)
+  },
+})
+const ufo = createUfo()
+world.scene.add(...grass.meshes, grass.clippings, sign.group, shop.group, mower.group, rider.group, trimmer.group, sunflowers.mesh, robots.group, cows.group, ufo.group, ...particles.meshes)
 
 const camera = new PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 1500)
 const viewmodel = createViewmodel(renderer)
@@ -166,6 +181,10 @@ let shopRefreshedAt = 0
 /** When the end-of-game show started, or null if it isn't running. */
 let showAt: number | null = null
 let certificateHinted = false
+/** Seconds into the day-night cycle. Picks up from your play time, and keeps turning after the meadow is done. */
+let clock = playSeconds
+let mooedAt = -Infinity
+let ufoHum: ReturnType<Audio['ufo']> = null
 
 const toolId = (): ToolId => TOOLS[tool].id
 const minutesPlayed = () => Math.max(1, Math.round(playSeconds / 60))
@@ -184,6 +203,7 @@ function snapshot(): Save {
     player: player.state,
     playSeconds,
     finishedAt,
+    cows: cows.states.map((c) => ({ ...c })),
   }
 }
 
@@ -217,8 +237,8 @@ function equip(next: Tier) {
   player.setGait(id === 'mower' ? 'push' : id === 'rider' ? 'ride' : 'walk')
   placeMachines(false)
   if (id === 'trimmer') {
-    const { x, z, yaw } = player.state
-    Object.assign(trim, { x: x - Math.sin(yaw) * 1.4, z: z - Math.cos(yaw) * 1.4, spin: 0 })
+    Object.assign(trim, { ahead: 1.4, spin: 0 })
+    placeTrimmer()
   }
   hud.setCrosshair(id !== 'mower' && id !== 'rider')
   clickQueued = false
@@ -247,8 +267,15 @@ const forward = new Vector3()
 const pick: Pick = { blade: -1, s: 0 }
 let flowerTarget: Flower | null = null
 const scissorsAt = { x: 0, z: 0, active: false }
-/** The trimmer head on the ground, and how fast its line spins (0 to 1). */
-const trim = { x: 0, z: 0, spin: 0 }
+/** The trimmer head on the ground, how far ahead of you it is and how fast its line spins (0 to 1). */
+const trim = { x: 0, z: 0, ahead: 1.4, spin: 0 }
+
+/** Puts the trimmer head `trim.ahead` metres in front of you. */
+function placeTrimmer() {
+  const { x, z, yaw } = player.state
+  trim.x = x - Math.sin(yaw) * trim.ahead
+  trim.z = z - Math.cos(yaw) * trim.ahead
+}
 
 function aim() {
   camera.getWorldDirection(forward)
@@ -327,34 +354,14 @@ const hands = new Vector3()
 function runMachines(dt: number) {
   const id = toolId()
   const me = player.state
-  const fx = -Math.sin(me.yaw)
-  const fz = -Math.cos(me.yaw)
   let cut = 0
   if (id === 'trimmer') {
-    // The head chases the ground under the crosshair, within reach of the handle.
-    let tx = me.x + fx * TRIMMER.far
-    let tz = me.z + fz * TRIMMER.far
-    if (ray.dy < 0) {
-      const s = -ray.oy / ray.dy
-      tx = ray.ox + ray.dx * s
-      tz = ray.oz + ray.dz * s
-    }
-    let dx = tx - me.x
-    let dz = tz - me.z
-    const along = dx * fx + dz * fz
-    const side = Math.max(-1.1, Math.min(1.1, dx * -fz + dz * fx))
-    const ahead = Math.max(TRIMMER.near, Math.min(TRIMMER.far, along))
-    dx = fx * ahead - fz * side
-    dz = fz * ahead + fx * side
-    const mx = me.x + dx - trim.x
-    const mz = me.z + dz - trim.z
-    const gap = Math.hypot(mx, mz)
-    const step = Math.min(gap, TRIMMER.speed * dt * (gap > 3 ? 3 : 1))
-    if (gap > 1e-4) {
-      trim.x += (mx / gap) * step
-      trim.z += (mz / gap) * step
-    }
-    trim.spin = Math.max(0, Math.min(1, trim.spin + (mouseHeld ? dt * 4 : -dt * 2)))
+    // The head sits straight ahead, where the crosshair meets the ground, within reach of the handle.
+    // Only that distance eases; turning and walking carry the head with you.
+    const want = ray.dy < 0 ? Math.hypot(ray.dx, ray.dz) * (-ray.oy / ray.dy) : TRIMMER.far
+    trim.ahead += (Math.max(TRIMMER.near, Math.min(TRIMMER.far, want)) - trim.ahead) * Math.min(1, dt * TRIMMER.follow)
+    placeTrimmer()
+    trim.spin = Math.max(0, Math.min(1, trim.spin + (mouseHeld ? dt * 6 : -dt * 2)))
     if (trim.spin > 0.6) {
       cut = cutting.circle(trim.x, trim.z, TRIMMER.radius, 'trimmer', me, time, 'you')
       if (cut) particles.chips(chute.set(trim.x, 0.15, trim.z), { x: trim.x - me.x, z: trim.z - me.z }, Math.min(8, 1 + cut), time)
@@ -580,7 +587,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', save)
 
 /** 1 for day, 0 for night, following the end-of-game show. */
-function daylight() {
+function showDaylight() {
   if (showAt === null) return 1
   const t = time - showAt
   const dusk = Math.min(1, t / DUSK_SECONDS)
@@ -592,7 +599,39 @@ function daylight() {
 
 const bubbleAt = new Vector3()
 
-/** Where you and your tool bend the grass: pusher slots 0 and 1. Robots fill the rest. */
+/** Cows are solid. Pushes you, or the mower you're behind or on, out of them; a bumped cow complains. */
+function bumpCows() {
+  const id = toolId()
+  const me = player.state
+  const [ahead, radius] = id === 'rider' ? [0.55, 1.05] : id === 'mower' ? [0.9, 0.7] : [0, 0.35]
+  const fx = -Math.sin(me.yaw)
+  const fz = -Math.cos(me.yaw)
+  const body = { x: me.x + fx * ahead, z: me.z + fz * ahead }
+  const bumped = cows.push(body, radius)
+  if (!bumped) return
+  me.x = body.x - fx * ahead
+  me.z = body.z - fz * ahead
+  if (time - mooedAt > 6) {
+    mooedAt = time
+    audio.moo(placement(bumped.x, bumped.z))
+  }
+}
+
+/** Keeps the UFO's hum where the UFO is, pitched up as it comes closer and down as it goes. */
+function hearUfo(seen: ReturnType<typeof ufo.update>) {
+  if (!seen) {
+    ufoHum?.stop()
+    ufoHum = null
+    return
+  }
+  ufoHum ??= audio.ufo()
+  // Much louder than anything on the ground, so it carries from far off.
+  const at = { volume: Math.min(1, 45 / seen.distance) ** 1.3, pan: placement(seen.x, seen.z).pan }
+  ufoHum?.set(at, 343 / (343 - Math.max(-150, Math.min(150, seen.closing))))
+  if (seen.zap) ufoHum?.zap(at)
+}
+
+/** Where you and your tool bend the grass: pusher slots 0 and 1. Robots and cows fill the rest. */
 function setPushers() {
   const p = grass.pushers
   const id = toolId()
@@ -649,8 +688,10 @@ renderer.setAnimationLoop((now) => {
   const active = ownsTab && (playing || hud.shopOpen)
   const growing = active && finishedAt === null
   if (growing) playSeconds += seconds
+  if (active) clock += seconds
   if (playing) {
     const steps = player.update(dt)
+    bumpCows()
     const density = grass.densityAt(player.state.x, player.state.z)
     if (steps > 0 && density > 0.15) audio.rustle(0.05 + density * 0.07, 0.3)
   }
@@ -672,6 +713,7 @@ renderer.setAnimationLoop((now) => {
     const { x, z, yaw } = player.state
     hands.set(x - Math.sin(yaw) * 0.32 + Math.cos(yaw) * 0.24, 0.98, z - Math.cos(yaw) * 0.32 - Math.sin(yaw) * 0.24)
     if (!working) trim.spin = Math.max(0, trim.spin - dt * 2)
+    placeTrimmer()
     trimmer.update(trim.x, trim.z, hands, time, dt, trim.spin)
   }
   const engine = id === 'mower' || id === 'rider' || id === 'trimmer' ? id : null
@@ -696,6 +738,7 @@ renderer.setAnimationLoop((now) => {
 
   setPushers()
   robots.update(time, dt, finishedAt === null, active, player.state, player.state)
+  cows.update(time, dt, active, finishedAt === null, player.state, holdings.robots, grass.pushers, 5)
   if (growing) grass.regrow(seconds)
   sunflowers.update(time, dt, growing, player.state)
 
@@ -711,11 +754,11 @@ renderer.setAnimationLoop((now) => {
   }
   hud.setPrompt(playing && nearFarmer())
 
-  if (showAt !== null) {
-    const day = daylight()
-    world.setDaylight(day)
-    viewmodel.setDaylight(day)
-  }
+  const day = Math.min(daylightAt(clock), showDaylight())
+  world.setDaylight(day)
+  viewmodel.setDaylight(day)
+  audio.setNight(day < 0.5)
+  hearUfo(ufo.update(time, day < 0.5, active, player.state))
   if (finishedAt === null && grass.standing === 0) finish()
   if (finishedAt !== null && !certificateHinted && showAt !== null && time - showAt > DUSK_SECONDS + SHOW_SECONDS) {
     certificateHinted = true
@@ -769,6 +812,19 @@ if (import.meta.env.DEV) {
       save,
       cutMany,
       equip,
+      cows,
+      /** Makes cow k leave a pat right now. */
+      pat(k = 0) {
+        cows.pat(k, time)
+      },
+      /** Sends a UFO over right now. */
+      ufo() {
+        ufo.summon(time, player.state)
+      },
+      /** Jumps the day-night cycle to `seconds`: 0 is morning, 420 is dusk. */
+      setClock(seconds: number) {
+        clock = seconds
+      },
       setPlaying(value: boolean) {
         playing = value
         if (value) hud.hideMenu()

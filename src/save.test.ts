@@ -22,6 +22,7 @@ function sampleSave(): Save {
     player: { x: 1.5, z: -2.25, yaw: 0.5, pitch: -0.2 },
     playSeconds: 93.5,
     finishedAt: null,
+    cows: [{ x: -8, z: 70, yaw: 1 }],
   }
 }
 
@@ -57,6 +58,14 @@ describe('save', () => {
     expect(decodeSave(bytes.subarray(0, bytes.length - 1), cellBlade)).toBeNull()
     expect(decodeSave(withHeader(bytes, (json) => ({ ...json, version: 2 })), cellBlade)).toBeNull()
     expect(decodeSave(withHeader(bytes, (json) => ({ ...json, coins: -5 })), cellBlade)).toBeNull()
+  })
+
+  it('opens saves from before the cows, with all their progress', () => {
+    const bytes = withHeader(encodeSave(sampleSave(), cellBlade), ({ cows: _, ...json }) => json)
+    const loaded = decodeSave(bytes, cellBlade)
+    expect(loaded?.cows).toEqual([])
+    expect(loaded?.coins).toBe(1234)
+    expect(loaded?.growth[7]).toBe(0)
   })
 
   it('keeps progress when only the position, timer or tool is broken', () => {

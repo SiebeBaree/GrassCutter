@@ -36,8 +36,11 @@ export const SCISSORS = { reach: 2.6, radius: 0.32, interval: 0.32 }
  * `halfArc` is the angle either side of where you face.
  */
 export const SICKLE = { inner: 0.3, reach: 1.45, halfArc: 0.95, swing: 0.56, cutShare: 0.4 }
-/** A spinning line of `radius` that follows your aim along the ground, between `near` and `far` metres from your feet. */
-export const TRIMMER = { radius: 0.42, near: 0.85, far: 2.3, speed: 3.6 }
+/**
+ * A spinning line of `radius`, held straight ahead of you between `near` and `far` metres from your feet.
+ * It turns with your view and goes wherever you go; looking up or down slides it out or in at `follow`.
+ */
+export const TRIMMER = { radius: 0.5, near: 0.85, far: 2.4, follow: 12 }
 /** Everything under the deck: a rectangle centred `ahead` metres in front of you. */
 export const MOWER = { ahead: 1.4, halfWidth: 0.6, halfLength: 0.42, speed: 4 }
 /** The riding mower's deck sits under its belly, a little ahead of the seat. */

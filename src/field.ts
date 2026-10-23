@@ -22,8 +22,8 @@ export const STUB_HEIGHT = 0.06
 export const SPROUT_HEIGHT = 0.12
 export const WIND_DIR = { x: 0.928, z: 0.371 }
 
-/** Things that bend grass away from them: you, the mower deck and the robots. */
-export const PUSHERS = 5
+/** Things that bend grass away from them: you, the mower deck, the robots and the cows. */
+export const PUSHERS = 7
 /** A pusher nobody is using sits far off the map. */
 export const PARKED = 1e4
 

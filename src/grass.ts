@@ -19,6 +19,7 @@ import {
 import {
   BLADE_COUNT,
   BLADE_SEGMENTS,
+  cellCoord,
   CELLS,
   CELLS_PER_CHUNK,
   CHUNK,
@@ -55,10 +56,11 @@ const GROW_SECONDS = 60
 const GROW_TICK = 0.25
 /**
  * Regrowth tries per second. Each picks a random blade and one of its neighbours, and sprouts the
- * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 17 minutes
- * on average; the edge of a mown patch creeps back slower. Cleared ground with no grass next to it never does.
+ * neighbour if it was cut. A blade cut in the middle of tall grass comes back after about 3 minutes
+ * on average; the edge of a mown patch creeps in a row every 7 minutes or so. Cleared ground with no
+ * grass next to it never does, unless a cow fertilises it.
  */
-const REGROWTH_TRIES = 1000
+const REGROWTH_TRIES = 6000
 /** Stubs fade out between these distances, inside the nearest detail level. Further out the ground paints the cut look. */
 const STUB_FADE = [5, 8] as const
 
@@ -641,6 +643,21 @@ export function createGrass(field: Field, growth: Growth, noise: Texture, onDens
         const i = regrowthCandidate(field, growth, Math.random)
         if (i >= 0) sprout(i)
       }
+    },
+    /** Brings back every cut blade rooted within r of (x, z) as a sprout. Returns how many came back. */
+    sproutAround(x: number, z: number, r: number) {
+      let count = 0
+      const maxX = cellCoord(x + r)
+      const maxZ = cellCoord(z + r)
+      for (let cz = cellCoord(z - r); cz <= maxZ; cz++) {
+        for (let cx = cellCoord(x - r); cx <= maxX; cx++) {
+          const i = field.cellBlade[cz * CELLS + cx]
+          if (i < 0 || growth[i] !== 0 || Math.hypot(field.x[i] - x, field.z[i] - z) > r) continue
+          sprout(i)
+          count++
+        }
+      }
+      return count
     },
     /**
      * Drops the top of blade i as a clipping that tips over from startTime. Call before cut(), while

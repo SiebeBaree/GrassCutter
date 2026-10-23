@@ -224,6 +224,12 @@ export function createSunflowers(field: Field, saved: Vec2[] | null, random = Ma
       mesh.count = flowers.length
       mesh.instanceMatrix.needsUpdate = true
     },
+    /** A seedling at `at`, unless the meadow already has as many flowers as it holds. Returns whether it was planted. */
+    plantAt(at: Vec2) {
+      if (flowers.filter(standing).length >= MAX) return false
+      plant(at, 0.08)
+      return true
+    },
     /** The standing flower whose stem or head the ray hits first within reach, and how far along the ray. */
     pick(ray: Ray, reach: number) {
       let best: Flower | null = null
