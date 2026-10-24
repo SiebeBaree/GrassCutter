@@ -20,6 +20,8 @@ pnpm dev
 | Esc | Pause |
 | M | Sound on or off |
 
+On an iPhone or iPad, put a thumb down on the left of the screen and a stick appears under it. Push it all the way to run. Drag anywhere else to look. Hold Cut to cut, and drag it to aim while you do. Tap the hotbar to switch tools and tap Shop at the farmer's stall. Added to the home screen, the game opens full screen.
+
 ## How it plays
 
 Every blade you cut pays one bCoin. Spend them at the farm shop next to where you start. The farmer sells tools in order, each one faster than the last:
@@ -45,7 +47,7 @@ Sunflowers come up now and then. Snip one with the nail clipper or scissors and 
 
 Clear the last blade and the sky goes dark for a fireworks show. The pause menu then offers a certificate PNG with your name and how long it took.
 
-After three minutes without a key, click, scroll or mouse move, the game pauses, and the robots stop with it. Progress saves every few seconds and when you pause or close the tab. To erase it, choose "Start over" in the pause menu and type ERASE. The game runs in one tab at a time.
+After three minutes without a key, click, scroll, mouse move or touch, the game pauses, and the robots stop with it. Progress saves every few seconds and when you pause or close the tab. To erase it, choose "Start over" in the pause menu and type ERASE. The game runs in one tab at a time.
 
 ## How it works
 
@@ -56,6 +58,7 @@ Everything you see and hear is generated in code: Three.js meshes, GLSL shaders,
 - `src/cows.ts` walks the cows from patch to patch. They graze where they stand, step away when you get close and drop pats that call `grass.sproutAround()`.
 - `src/ufo.ts` picks a time at dusk for tonight's visit. The saucer glides in, hovers over the meadow ahead of you, beams it and accelerates away. Its hum is pitched by its speed toward you. Beamed blades get a byte of their own in `src/grass.ts` that the shader reads to draw them purple and taller.
 - `src/robots.ts` gives each robot a target: a sunflower if it carries clippers or scissors, then the nearest grass, then the nearest patch no other robot has claimed. Machines prefer grass ahead of them, so they mow in lines.
+- `src/touch.ts` draws the stick and buttons on phones and tablets. They feed the same player input and cut flag as the keyboard and mouse, and the game skips pointer lock.
 - `src/cutting.ts` holds how each tool cuts, shared by you and the robots.
 - `src/shop.ts` builds the stall and the farmer, who turns to face you and talks in a speech bubble. `src/icons.ts` photographs the tool models once at startup for the hotbar and the shop.
 - `src/save.ts` stores a JSON header plus one bit per blade, in grid order so mown stripes compress well. Fields added after 3.0, like the cows, are optional, so older v3 saves still open. `src/vault.ts` compresses it and seals it with AES-GCM. The key comes from a secret in the game, a random salt made on your first visit and your browser, so an edited or copied save fails to open and the game starts fresh.

@@ -1,6 +1,6 @@
 import { priceOf, type Holdings, type Purchase } from './economy'
 import { ROBOT_COLORS } from './robots'
-import { MAX_ROBOTS, ROBOT_PRICES, TOOLS, type Tier } from './tools'
+import { MAX_ROBOTS, ROBOT_PRICES, TIERS, TOOLS, type Tier } from './tools'
 
 const fmt = new Intl.NumberFormat('en-US')
 const NAME_KEY = 'grass-cutter/name'
@@ -17,7 +17,7 @@ export type Icons = { tools: string[]; robot: string }
 /** What you type to erase your save. */
 const RESET_WORD = 'ERASE'
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text = '') {
+export function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text = '') {
   const node = document.createElement(tag)
   node.className = className
   node.textContent = text
@@ -57,10 +57,16 @@ type Handlers = {
   onCertificate: (name: string) => void
   onBuy: (purchase: Purchase) => void
   onLeaveShop: () => void
+  /** Taps on touch screens: the shop prompt and the hotbar. */
+  onShop: () => void
+  onSlot: (tier: Tier) => void
 }
 
-/** Crosshair, wallet, hotbar, toasts, the farmer's speech, the shop and the menus. Plain DOM over the canvas. */
-export function createHud(root: HTMLElement, handlers: Handlers) {
+/**
+ * Crosshair, wallet, hotbar, toasts, the farmer's speech, the shop and the menus. Plain DOM over the canvas.
+ * With `touch`, the hotbar and shop prompt take taps and the copy says tap instead of click.
+ */
+export function createHud(root: HTMLElement, handlers: Handlers, touch: boolean) {
   const crosshair = el('div', 'crosshair')
 
   const wallet = el('div', 'wallet')
@@ -81,6 +87,7 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
     const icon = el('img', 'slot-icon')
     icon.alt = ''
     slot.append(icon, el('span', 'slot-key', String(k + 1)))
+    slot.addEventListener('click', () => handlers.onSlot(TIERS[k]))
     hotbar.append(slot)
     return { slot, icon }
   })
@@ -88,8 +95,10 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
   status.append(toolName, meter, hotbar)
 
   const prompt = el('div', 'prompt')
-  prompt.append(el('kbd', '', 'E'), el('span', '', 'Shop'))
+  if (!touch) prompt.append(el('kbd', '', 'E'))
+  prompt.append(el('span', '', 'Shop'))
   prompt.hidden = true
+  prompt.addEventListener('click', () => handlers.onShop())
 
   const bubble = el('div', 'bubble')
   bubble.hidden = true
@@ -345,11 +354,11 @@ export function createHud(root: HTMLElement, handlers: Handlers) {
               : kind === 'away'
                 ? 'The game pauses after three minutes without input'
                 : `${formatShare(progress.share)} cut · ${fmt.format(Math.floor(progress.coins))} bCoins`
-      start.textContent = kind === 'welcome' ? 'Click to start' : 'Click to continue'
+      start.textContent = `${touch ? 'Tap' : 'Click'} to ${kind === 'welcome' ? 'start' : 'continue'}`
       start.hidden = kind === 'busy'
       certificate.hidden = kind !== 'finished'
       reset.hidden = kind === 'welcome' || kind === 'busy'
-      hint.hidden = kind === 'busy'
+      hint.hidden = kind === 'busy' || touch
       menu.classList.toggle('welcome', kind === 'welcome')
       menu.hidden = false
       document.body.classList.add('in-menu')

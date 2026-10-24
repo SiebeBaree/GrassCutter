@@ -16,6 +16,8 @@ const RIDER_SEAT_BACK = 0.22
 const SENSITIVITY = 0.0022
 /** Radians of bob phase per metre walked: roughly one step every 0.7 m. */
 const STEP_RATE = Math.PI / 0.72
+/** Push the touch stick this far and you run. */
+const STICK_RUN = 0.9
 
 const MOVE_KEYS = {
   KeyW: [0, 1],
@@ -36,11 +38,12 @@ export type Gait = 'walk' | 'push' | 'ride'
 
 /**
  * First-person mover. On foot, WASD walks relative to where you look. On the riding mower, W and S
- * drive, A and D steer, and the mouse turns it too.
+ * drive, A and D steer, and the mouse turns it too. The touch stick does the same, in proportion.
  */
 export function createPlayer(start: PlayerState) {
   const state: PlayerState = { ...start }
   const held = new Set<string>()
+  const stick = { x: 0, z: 0 }
   let vx = 0
   let vz = 0
   let bob = 0
@@ -49,8 +52,8 @@ export function createPlayer(start: PlayerState) {
   let gait: Gait = 'walk'
 
   const input = () => {
-    let ix = 0
-    let iz = 0
+    let ix = stick.x
+    let iz = stick.z
     for (const code of held) {
       if (!isMoveKey(code)) continue
       ix += MOVE_KEYS[code][0]
@@ -91,8 +94,15 @@ export function createPlayer(start: PlayerState) {
     keyUp(code: string) {
       held.delete(code)
     },
+    /** The touch stick: -1 to 1, x to the right and z forward. */
+    setStick(x: number, z: number) {
+      stick.x = x
+      stick.z = z
+    },
     releaseAll() {
       held.clear()
+      stick.x = 0
+      stick.z = 0
     },
     look(dx: number, dy: number) {
       // Some browsers report huge jumps right after pointer lock; ignore them.
@@ -103,13 +113,14 @@ export function createPlayer(start: PlayerState) {
     /** Moves the player and returns how many steps were taken this frame (for footstep sounds). */
     update(dt: number) {
       const { ix, iz } = input()
-      const running = held.has('ShiftLeft') || held.has('ShiftRight')
+      const running = held.has('ShiftLeft') || held.has('ShiftRight') || Math.hypot(stick.x, stick.z) > STICK_RUN
       let tx = 0
       let tz = 0
       if (gait === 'ride') {
-        steer += (Math.sign(ix) - steer) * Math.min(1, dt * 6)
+        steer += (Math.max(-1, Math.min(1, ix)) - steer) * Math.min(1, dt * 6)
         state.yaw -= steer * RIDER.turn * dt
-        const ahead = iz > 0 ? RIDER.speed : iz < 0 ? -RIDER.reverse : 0
+        const throttle = Math.min(1, Math.abs(iz))
+        const ahead = iz > 0 ? RIDER.speed * throttle : iz < 0 ? -RIDER.reverse * throttle : 0
         tx = -Math.sin(state.yaw) * ahead
         tz = -Math.cos(state.yaw) * ahead
       } else {
@@ -120,8 +131,10 @@ export function createPlayer(start: PlayerState) {
           const sin = Math.sin(state.yaw)
           const cos = Math.cos(state.yaw)
           // Forward is -z at yaw 0; right is +x.
-          tx = ((ix * cos - iz * sin) / len) * speed
-          tz = ((-ix * sin - iz * cos) / len) * speed
+          // Keys push full speed in any direction; the stick goes slower when barely pushed.
+          const pace = (speed * Math.min(1, len)) / len
+          tx = (ix * cos - iz * sin) * pace
+          tz = (-ix * sin - iz * cos) * pace
         }
       }
       // A riding mower picks up speed slower than legs do.

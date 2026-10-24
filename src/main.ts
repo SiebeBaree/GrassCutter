@@ -23,6 +23,7 @@ import { createSign } from './sign'
 import type { Flower } from './sunflowers'
 import { createSunflowers } from './sunflowers'
 import { CLIPPER, MOWER, RIDER, SCISSORS, SICKLE, sickleSweep, SUNFLOWER_VALUE, TIERS, TOOLS, TRIMMER, UFO_GRASS, type Tier, type ToolId } from './tools'
+import { createTouchControls, isTouchDevice } from './touch'
 import { createTrimmer } from './trimmer'
 import { createUfo, type Sighting } from './ufo'
 import { createViewmodel } from './viewmodel'
@@ -169,6 +170,8 @@ minimap = createMinimap(document.body, grass.bladesPerCell, grass.uncutPerCell)
 
 let tool: Tier = saved?.tool ?? 0
 let playing = false
+const touchMode = isTouchDevice()
+if (touchMode) document.body.classList.add('touch-mode')
 let resetting = false
 let saveWarned = false
 let sinceSave = 0
@@ -395,11 +398,43 @@ function runMachines(dt: number) {
   mowLoad += (Math.min(1, cut / dt / (id === 'rider' ? 260 : 120)) - mowLoad) * Math.min(1, dt * 6)
 }
 
-function lockPointer() {
+/** Into the game: pointer lock with a mouse, straight in on a touch screen. Leaving it shows the menu or the shop. */
+function enterGame() {
+  if (touchMode) {
+    setPlaying(true)
+    return
+  }
   const canvas = renderer.domElement
   // Raw mouse input where supported, plain pointer lock elsewhere. Firefox returns undefined, not a promise.
   const plain = () => Promise.resolve(canvas.requestPointerLock()).catch(() => {})
   Promise.resolve(canvas.requestPointerLock({ unadjustedMovement: true })).catch(plain)
+}
+
+function leaveGame() {
+  if (touchMode) setPlaying(false)
+  else document.exitPointerLock()
+}
+
+function setPlaying(next: boolean) {
+  if (next === playing) return
+  playing = next
+  mouseHeld = false
+  clickQueued = false
+  if (playing) {
+    hud.hideMenu()
+    if (hud.shopOpen) hud.closeShop()
+  } else {
+    player.releaseAll()
+    touchControls?.reset()
+    if (!hud.shopOpen) hud.showMenu(pausedMenu(), progress())
+    save()
+  }
+}
+
+/** Number keys and hotbar taps. Tools you don't own yet just show their price. */
+function pickSlot(slot: Tier) {
+  if (slot <= holdings.tier) equip(slot)
+  else hud.toast(`${TOOLS[slot].name}: ${TOOLS[slot].price.toLocaleString('en-US')} bCoins`, 2.5, 'For sale at the farm shop')
 }
 
 // What the farmer says. He greets you, then pitches whatever's cheapest, with the odd aside.
@@ -441,13 +476,13 @@ function openShop() {
   hud.openShop(holdings)
   hud.setPrompt(false)
   shop.say(holdings.coins < (cheapestOffer(holdings)?.price ?? 0) ? 'Just looking? No charge for that.' : 'What can I get you?', time)
-  document.exitPointerLock()
+  leaveGame()
 }
 
 function closeShop(relock: boolean) {
   hud.closeShop()
   save()
-  if (relock) lockPointer()
+  if (relock) enterGame()
   else hud.showMenu(pausedMenu(), progress())
 }
 
@@ -461,7 +496,7 @@ const hud = createHud(document.body, {
       hasSave = true
       save()
     }
-    lockPointer()
+    enterGame()
   },
   onReset() {
     resetting = true
@@ -494,7 +529,13 @@ const hud = createHud(document.body, {
   onLeaveShop() {
     closeShop(true)
   },
-})
+  onShop() {
+    if (playing && nearFarmer()) openShop()
+  },
+  onSlot(slot) {
+    if (playing) pickSlot(slot)
+  },
+}, touchMode)
 hud.setIcons(renderIcons())
 
 const pausedMenu = () => (finishedAt !== null ? 'finished' : away ? 'away' : 'paused')
@@ -504,19 +545,7 @@ equip(tool)
 if (finishedAt !== null) sign.showFinished(formatDuration(minutesPlayed()))
 document.querySelector('#loading')?.remove()
 
-document.addEventListener('pointerlockchange', () => {
-  playing = document.pointerLockElement === renderer.domElement
-  mouseHeld = false
-  clickQueued = false
-  if (playing) {
-    hud.hideMenu()
-    if (hud.shopOpen) hud.closeShop()
-  } else {
-    player.releaseAll()
-    if (!hud.shopOpen) hud.showMenu(pausedMenu(), progress())
-    save()
-  }
-})
+document.addEventListener('pointerlockchange', () => setPlaying(document.pointerLockElement === renderer.domElement))
 // Pointer lock can be refused, for instance right after leaving it. Fall back to the menu.
 document.addEventListener('pointerlockerror', () => {
   if (!playing && !hud.shopOpen) hud.showMenu(pausedMenu(), progress())
@@ -524,18 +553,37 @@ document.addEventListener('pointerlockerror', () => {
 
 // Any input counts as being here. Held keys don't repeat into it, so a weighted-down key still goes idle.
 const touch = () => (inputAt = performance.now())
-for (const kind of ['mousemove', 'mousedown', 'wheel'] as const) document.addEventListener(kind, touch, { passive: true })
+for (const kind of ['mousemove', 'mousedown', 'wheel', 'touchstart', 'touchmove'] as const) document.addEventListener(kind, touch, { passive: true })
 window.addEventListener('keydown', (e) => !e.repeat && touch())
 
+/** Turns the view by mouse pixels, and sways the tool in hand with it. */
+function look(dx: number, dy: number) {
+  player.look(dx, dy)
+  lookX += dx
+  lookY += dy
+}
+
+// On touch screens the controls drive the game and taps don't double as mouse clicks. They sit in #app,
+// under the HUD, so the hotbar and shop prompt still take taps.
+const touchControls = touchMode
+  ? createTouchControls(app, {
+      move: (x, z) => player.setStick(x, z),
+      look,
+      cut(held) {
+        mouseHeld = held && playing
+        if (mouseHeld) clickQueued = true
+      },
+      pause: leaveGame,
+    })
+  : null
+
 document.addEventListener('mousemove', (e) => {
-  if (!playing) return
-  player.look(e.movementX, e.movementY)
-  lookX += e.movementX
-  lookY += e.movementY
+  if (!playing || touchMode) return
+  look(e.movementX, e.movementY)
 })
 
 document.addEventListener('mousedown', (e) => {
-  if (!playing || e.button !== 0) return
+  if (!playing || touchMode || e.button !== 0) return
   mouseHeld = true
   clickQueued = true
 })
@@ -581,8 +629,7 @@ window.addEventListener('keydown', (e) => {
   }
   const slot = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code)
   if (playing && slot >= 0) {
-    if (slot <= holdings.tier) equip(TIERS[slot])
-    else hud.toast(`${TOOLS[slot].name}: ${TOOLS[slot].price.toLocaleString('en-US')} bCoins`, 2.5, 'For sale at the farm shop')
+    pickSlot(TIERS[slot])
     return
   }
   if (playing && player.keyDown(e.code)) e.preventDefault()
@@ -602,6 +649,8 @@ window.addEventListener('resize', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    // Pointer lock lets go by itself when the tab hides. Touch play needs telling.
+    if (touchMode && playing) leaveGame()
     save()
     audio.suspend()
   } else {
@@ -722,7 +771,7 @@ renderer.setAnimationLoop((now) => {
   if ((playing || hud.shopOpen) && performance.now() - inputAt > IDLE_SECONDS * 1000) {
     away = true
     if (hud.shopOpen) closeShop(false)
-    else document.exitPointerLock()
+    else leaveGame()
   }
 
   // The meadow lives while you're in the game: playing, or browsing the shop. Not behind the pause menu.
@@ -803,7 +852,7 @@ renderer.setAnimationLoop((now) => {
   if (finishedAt === null && grass.standing === 0) finish()
   if (finishedAt !== null && !certificateHinted && showAt !== null && time - showAt > DUSK_SECONDS + SHOW_SECONDS) {
     certificateHinted = true
-    if (playing) hud.toast('Press Esc for your certificate', 6)
+    if (playing) hud.toast(touchMode ? 'Pause for your certificate' : 'Press Esc for your certificate', 6)
   }
 
   grass.update(time, camera.position)
