@@ -172,6 +172,9 @@ let tool: Tier = saved?.tool ?? 0
 let playing = false
 const touchMode = isTouchDevice()
 if (touchMode) document.body.classList.add('touch-mode')
+// Safari ignores user-scalable=no and reads two thumbs (stick and look) as a pinch. Its gesture events are
+// the only reliable way to keep the page from zooming.
+for (const kind of ['gesturestart', 'gesturechange', 'dblclick'] as const) document.addEventListener(kind, (e) => e.preventDefault())
 let resetting = false
 let saveWarned = false
 let sinceSave = 0

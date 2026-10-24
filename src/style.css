@@ -14,7 +14,8 @@ body {
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
+  /* Scrolling only: no pinch or double-tap zoom. */
+  touch-action: pan-x pan-y;
 }
 
 canvas {
